@@ -60,7 +60,7 @@ View-of-Delft-Dataset (root)
 
 
 #### 3. Data infos generation
-* Firstly, remember to change **DATA-PATH** in the tools/cfgs/dataset_configs/radar_5frames_as_kitti_dataset.yaml .
+* Firstly, remember to change **DATA-PATH** in the tools/cfgs/dataset_configs/radar_5frames_as_kitti_dataset.yaml  and pcdet/datasets/kitti/kitti_dataset.py
 
 * Generate the data infos by running the following command: 
 ```
