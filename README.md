@@ -10,14 +10,13 @@ This code is mainly based on [OpenPCDet](https://github.com/open-mmlab/OpenPCDet
 
 ### 1. Clone (or download) the source code 
 ```
-git clone https://github.com/ylwhxht/L4DR.git 
+git clone https://github.com/sungeunmik/VoD_baseline_UCSD.git
 cd L4DR
 ```
  
 ### 2. Create conda environment and set up the base dependencies
 ```
-Sung Eun ) I would use python=3.8
-conda create --name l4dr python=3.7 cmake=3.22.1
+conda create --name l4dr python=3.8 cmake=3.22.1
 conda activate l4dr
 pip install torch==1.10.1+cu111 torchvision==0.11.2+cu111 torchaudio==0.10.1 -f https://download.pytorch.org/whl/torch_stable.html
 pip install spconv-cu113
