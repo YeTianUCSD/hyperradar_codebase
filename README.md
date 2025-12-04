@@ -59,19 +59,6 @@ View-of-Delft-Dataset (root)
 ```
 
 
-#### 2. Data structure alignment
-In order to train the LiDAR and 4DRadar fusion model according to the logic of OpenPCDet, we then need to generate LiDAR and 4DRadar fusion data infos.
-* First, create an additional folder with lidar and radar point clouds in the VoD dataset directory (here we call it **rlfusion_5f**):
-```
-View-of-Delft-Dataset (root)
-    ├── lidar
-    ├── radar
-    ├── radar_3_scans
-    ├── radar_5_scans
-    ├── fog_sim_lidar 
-```
-
-
 
 #### 3. Data infos generation
 * Firstly, remember to change **DATA-PATH** in the [VoD dataset cfg file](https://github.com/ylwhxht/L4DR/blob/main/tools/cfgs/dataset_configs/Vod_fusion.yaml).
