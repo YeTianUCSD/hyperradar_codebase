@@ -61,7 +61,7 @@ View-of-Delft-Dataset (root)
 
 
 #### 3. Data infos generation
-* Firstly, remember to change **DATA-PATH** in the [VoD dataset cfg file](https://github.com/ylwhxht/L4DR/blob/main/tools/cfgs/dataset_configs/Vod_fusion.yaml).
+* Firstly, remember to change **DATA-PATH** in the tools/cfgs/dataset_configs/radar_5frames_as_kitti_dataset.yaml .
 
 * Generate the data infos by running the following command: 
 ```
