@@ -1,6 +1,6 @@
 import pickle
 import time
-import signal
+
 import numpy as np
 import torch
 import tqdm
@@ -24,8 +24,8 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     result_dir.mkdir(parents=True, exist_ok=True)
 
     final_output_dir = result_dir / 'final_result' / 'data'
-    final_output_dir.mkdir(parents=True, exist_ok=True)   
-
+    if args.save_to_file:
+        final_output_dir.mkdir(parents=True, exist_ok=True)
 
     metric = {
         'gt_num': 0,
@@ -131,79 +131,14 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     with open(result_dir / 'result.pkl', 'wb') as f:
         pickle.dump(det_annos, f)
 
-    
-    # --- evaluation: force print + debug ---
-    logger.info('*************** Running dataset.evaluation() *****************')
-    logger.info('EVAL_METRIC=%s' % str(cfg.MODEL.POST_PROCESSING.get('EVAL_METRIC', None)))
-    logger.info('output_path=%s' % str(final_output_dir))
-
-
-    t0 = time.time()
-    logger.info('Entering dataset.evaluation() ...')
-
-    eval_ret = dataset.evaluation(
+    result_str, result_dict = dataset.evaluation(
         det_annos, class_names,
         eval_metric=cfg.MODEL.POST_PROCESSING.EVAL_METRIC,
         output_path=final_output_dir
     )
 
-    logger.info('dataset.evaluation() finished in %.2f sec' % (time.time() - t0))
-
-    # Support different return formats: (str, dict) or dict or str
-    result_str, result_dict = '', {}
-    if isinstance(eval_ret, tuple) and len(eval_ret) == 2:
-        result_str, result_dict = eval_ret
-    elif isinstance(eval_ret, dict):
-        result_dict = eval_ret
-        result_str = str(eval_ret)
-    elif isinstance(eval_ret, str):
-        result_str = eval_ret
-    else:
-        result_str = f'Unexpected evaluation return type: {type(eval_ret)}'
-        result_dict = {}
-
-    # Print string results
-    if result_str is None:
-        result_str = ''
-    logger.info('*************** Evaluation Summary (raw) *****************')
-    if len(result_str.strip()) > 0:
-        logger.info('\n' + result_str)
-    else:
-        logger.info('[EMPTY result_str] dataset.evaluation returned empty string')
-
-    # Print dict keys (very important)
-    if isinstance(result_dict, dict):
-        logger.info('Evaluation result_dict keys (%d): %s' % (len(result_dict), sorted(list(result_dict.keys()))))
-    else:
-        logger.info('Evaluation result_dict is not a dict: %s' % str(type(result_dict)))
-
-    # Save metrics for later inspection
-    import json
-    def _jsonable(x):
-        import numpy as _np
-        if isinstance(x, (_np.floating,)):
-            return float(x)
-        if isinstance(x, (_np.integer,)):
-            return int(x)
-        if isinstance(x, _np.ndarray):
-            return x.tolist()
-        return x
-
-    metrics_path = result_dir / 'metrics_eval.json'
-    with open(metrics_path, 'w') as f:
-        if isinstance(result_dict, dict):
-            json.dump({k: _jsonable(v) for k, v in result_dict.items()}, f, indent=2)
-        else:
-            json.dump({"result_str": result_str}, f, indent=2)
-    logger.info('Saved evaluation metrics to %s' % str(metrics_path))
-
-    # Update ret_dict for tensorboard (avoid key collision)
-    if isinstance(result_dict, dict):
-        ret_dict.update({
-            f"eval/{k}": float(v)
-            for k, v in result_dict.items()
-            if isinstance(v, (int, float, np.floating, np.integer))
-        })
+    logger.info(result_str)
+    ret_dict.update(result_dict)
 
     logger.info('Result is saved to %s' % result_dir)
     logger.info('****************Evaluation done.*****************')

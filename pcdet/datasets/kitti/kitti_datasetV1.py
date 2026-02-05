@@ -357,49 +357,25 @@ class KittiDataset(DatasetTemplate):
         return annos
 
     def evaluation(self, det_annos, class_names, **kwargs):
-        import time, copy, traceback
-
-        def _log(msg):
-            if getattr(self, "logger", None) is not None:
-                self.logger.info(msg)
-            else:
-                print(msg, flush=True)
-
         if 'annos' not in self.kitti_infos[0].keys():
-            _log('[EVAL] no annos in infos, skip')
             return None, {}
-
+        
+        import time
         t0 = time.time()
-        _log('[EVAL] step0 begin evaluation()')
-
-        try:
-            _log('[EVAL] step1-1 importing package kitti_object_eval_python')
-            import pcdet.datasets.kitti.kitti_object_eval_python as pkg
-            _log('[EVAL] step1-2 importing eval module')
-            from .kitti_object_eval_python import eval as kitti_eval
-            _log('[EVAL] step1-3 import eval done')
-            _log('[EVAL] step1 import done (%.2fs)' % (time.time() - t0))
-
-            _log('[EVAL] step2 deepcopy gt/det')
-            eval_det_annos = copy.deepcopy(det_annos)
-            eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.kitti_infos]
-            _log('[EVAL] step2 copy done gt=%d det=%d (%.2fs)'
-                % (len(eval_gt_annos), len(eval_det_annos), time.time() - t0))
-
-            _log('[EVAL] step3 calling get_official_eval_result')
-            ap_result_str, ap_dict = kitti_eval.get_official_eval_result(
-                eval_gt_annos, eval_det_annos, class_names
-            )
-            _log('[EVAL] step3 done (%.2fs)' % (time.time() - t0))
-            return ap_result_str, ap_dict
-
-        except Exception as e:
-            _log('[EVAL][EXCEPTION] %s' % str(e))
-            _log(traceback.format_exc())
-            raise
+        print('[EVAL] importing kitti_object_eval_python.eval ...', flush=True)
+        from .kitti_object_eval_python import eval as kitti_eval
+        print('[EVAL] import done, elapsed=%.2fs' % (time.time() - t0), flush=True)
 
 
+        eval_det_annos = copy.deepcopy(det_annos)
+        eval_gt_annos = [copy.deepcopy(info['annos']) for info in self.kitti_infos]
 
+        t1 = time.time()
+        print('[EVAL] calling get_official_eval_result ...', flush=True)
+        ap_result_str, ap_dict = kitti_eval.get_official_eval_result(eval_gt_annos, eval_det_annos, class_names)
+        print('[EVAL] get_official_eval_result done, elapsed=%.2fs' % (time.time() - t1), flush=True)
+
+        return ap_result_str, ap_dict
 
     def __len__(self):
         if self._merge_all_iters_to_one_epoch:

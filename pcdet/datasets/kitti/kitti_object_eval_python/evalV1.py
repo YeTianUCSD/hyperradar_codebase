@@ -3,7 +3,7 @@ import io as sysio
 import numba
 import numpy as np
 
-from pcdet.datasets.kitti.kitti_object_eval_python.rotate_iou_shapely import rotate_iou_gpu_eval
+from pcdet.datasets.kitti.kitti_object_eval_python.rotate_iou import rotate_iou_gpu_eval
 
 
 @numba.jit
