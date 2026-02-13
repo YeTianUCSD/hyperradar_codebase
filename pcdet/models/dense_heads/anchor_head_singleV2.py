@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .anchor_head_template import AnchorHeadTemplate
 from ..hd.hd_core import HDCore
@@ -11,26 +10,16 @@ class AnchorHeadSingle(AnchorHeadTemplate):
     """
     PointPillars AnchorHeadSingle with optional HD (Hyperdimensional Computing) branch.
 
-    This version supports two variants for the feature used by HD:
-      - Option A (old): use BEV feature map (spatial_features_2d)
-      - Option B (new): use "penultimate" feature inside the cls head (cls_feat)
+    Path-1 (fast baseline / hd-only / fused ablation):
+      feat_mid := spatial_features_2d (cell-level BEV feature)
+      - Compute HD logits per CELL only: [B*H*W, C] -> [B*H*W, K]
+      - Repeat to anchors at that cell to match [B, H, W, A*K]
+      - Fuse with original conv_cls logits
 
-    Key idea for Option B:
-      - Replace 1-layer cls head (conv_cls) with 2-layer head:
-          cls_feat = conv_cls_pre(spatial_features_2d)        # penultimate feature
-          cls_logits = conv_cls_out(cls_feat)                 # final logits
-      - Run HD encoding / logits on cls_feat instead of spatial_features_2d,
-        so HD is closer to replacing the linear classifier.
-
-    Config knobs (optional; safe defaults if missing):
-      MODEL.DENSE_HEAD.CLS_FEAT_CHANNELS: int (default = input_channels)
-      MODEL.DENSE_HEAD.CLS_PRE_KERNEL:    int (default = 3)
-      MODEL.DENSE_HEAD.CLS_PRE_BN:        bool (default = True)
-      MODEL.DENSE_HEAD.CLS_PRE_RELU:      bool (default = True)
-
-      MODEL.DENSE_HEAD.HD.FEAT_SOURCE: "bev" | "cls" (default = "bev")
-        - "bev": use spatial_features_2d for HD (old behavior)
-        - "cls": use cls_feat for HD (new option B)
+    Notes:
+      - We DO NOT expand cell features to anchor-level for HD encoding to avoid OOM.
+      - assign_targets outputs keys used by AnchorHeadTemplate losses:
+          'box_cls_labels', 'box_reg_targets', etc.
     """
 
     def __init__(
@@ -47,15 +36,17 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         self.num_anchors_per_location = sum(self.num_anchors_per_location)
 
         # -----------------------------
-        # Box regression head (unchanged)
+        # Original PointPillars heads
         # -----------------------------
+        self.conv_cls = nn.Conv2d(
+            input_channels, self.num_anchors_per_location * self.num_class,
+            kernel_size=1
+        )
         self.conv_box = nn.Conv2d(
-            input_channels, self.num_anchors_per_location * self.box_coder.code_size, kernel_size=1
+            input_channels, self.num_anchors_per_location * self.box_coder.code_size,
+            kernel_size=1
         )
 
-        # -----------------------------
-        # Direction head (unchanged)
-        # -----------------------------
         if self.model_cfg.get('USE_DIRECTION_CLASSIFIER', None) is not None:
             self.conv_dir_cls = nn.Conv2d(
                 input_channels,
@@ -64,33 +55,6 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             )
         else:
             self.conv_dir_cls = None
-
-        # -----------------------------
-        # Classification head (NEW: 2-layer so we can take penultimate feature)
-        # -----------------------------
-        cls_feat_channels = int(self.model_cfg.get('CLS_FEAT_CHANNELS', input_channels))
-        cls_pre_kernel = int(self.model_cfg.get('CLS_PRE_KERNEL', 3))
-        cls_pre_bn = bool(self.model_cfg.get('CLS_PRE_BN', True))
-        cls_pre_relu = bool(self.model_cfg.get('CLS_PRE_RELU', True))
-
-        padding = cls_pre_kernel // 2
-        layers = [
-            nn.Conv2d(input_channels, cls_feat_channels, kernel_size=cls_pre_kernel, padding=padding, bias=not cls_pre_bn)
-        ]
-        if cls_pre_bn:
-            layers.append(nn.BatchNorm2d(cls_feat_channels))
-        if cls_pre_relu:
-            layers.append(nn.ReLU(inplace=True))
-
-        self.conv_cls_pre = nn.Sequential(*layers)
-
-        # final classifier (same as original conv_cls)
-        self.conv_cls_out = nn.Conv2d(
-            cls_feat_channels, self.num_anchors_per_location * self.num_class, kernel_size=1
-        )
-
-        # Keep for convenience/logs
-        self.cls_feat_channels = cls_feat_channels
 
         # -----------------------------
         # HD configs
@@ -110,11 +74,6 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         # If True, store origin/hd logits into forward_ret_dict for analysis
         self.hd_debug_save_logits = False
 
-        # Which feature map does HD use?
-        #   - "bev": spatial_features_2d
-        #   - "cls": cls_feat (penultimate)
-        self.hd_feat_source = "bev"
-
         self.hd_core = None
         if hd_cfg is not None and bool(hd_cfg.get("ENABLED", False)):
             self.hd_enabled = True
@@ -124,19 +83,10 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             self.hd_export_for_online = bool(hd_cfg.get("EXPORT_FOR_ONLINE", False))
             self.hd_debug_save_logits = bool(hd_cfg.get("DEBUG_SAVE_LOGITS", False))
 
-            # NEW: feature source for HD
-            self.hd_feat_source = str(hd_cfg.get("FEAT_SOURCE", "bev")).lower()
-            if self.hd_feat_source not in ("bev", "cls"):
-                self.hd_feat_source = "bev"
-
-            # IMPORTANT:
-            # If HD uses cls_feat, feat_dim must match cls_feat_channels.
-            # If HD uses bev, feat_dim matches input_channels.
-            hd_feat_dim = cls_feat_channels if self.hd_feat_source == "cls" else input_channels
-
+            # Path-1: feat_mid = spatial_features_2d (cell-level feature, dim=input_channels)
             self.hd_core = HDCore.from_cfg(
                 hd_cfg=hd_cfg,
-                feat_dim=hd_feat_dim,
+                feat_dim=input_channels,
                 num_classes=self.num_class
             )
 
@@ -144,24 +94,19 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
     def init_weights(self):
         pi = 0.01
-        # cls bias init goes to final cls conv (conv_cls_out)
-        nn.init.constant_(self.conv_cls_out.bias, -np.log((1 - pi) / pi))
+        nn.init.constant_(self.conv_cls.bias, -np.log((1 - pi) / pi))
         nn.init.normal_(self.conv_box.weight, mean=0, std=0.001)
-        # (optional) you can init conv_cls_pre conv weight, but defaults are fine
-
-    @staticmethod
-    def _as_float32(x: torch.Tensor) -> torch.Tensor:
-        return x.float() if x.dtype != torch.float32 else x
 
     def forward(self, data_dict):
         """
         Forward flow:
-          spatial_features_2d -> cls_head (pre + out) / box_head -> permute -> (optional) assign_targets -> decode boxes
+          spatial_features_2d -> conv_cls/conv_box -> permute -> (optional) assign_targets -> (optional) decode boxes
 
-        With HD enabled:
-          - compute HD logits per CELL: [B*H*W, C_feat] -> [B*H*W, K]
-          - repeat across anchors: [B,H,W,K] -> [B,H,W,A*K]
-          - fuse with original cls logits (origin) by mode/lambda
+        With HD enabled (Path-1 optimized):
+          - cell_feat = spatial_features_2d per BEV cell
+          - compute HD logits once per cell: [B*H*W, C] -> [B*H*W, K]
+          - repeat across anchors: [B,H,W,K] -> [B,H,W,A,K] -> [B,H,W,A*K]
+          - fuse with origin logits according to HD.MODE & HD.LAMBDA
         """
         spatial_features_2d = data_dict['spatial_features_2d']  # [B, C_in, H, W]
         B, C_in, H, W = spatial_features_2d.shape
@@ -169,16 +114,10 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         K = int(self.num_class)
 
         # -----------------------------
-        # CLS head (2-layer)
+        # Original predictions
         # -----------------------------
-        cls_feat = self.conv_cls_pre(spatial_features_2d)     # [B, C_cls, H, W]
-        data_dict["hd_cls_feat"] = cls_feat
-        cls_preds_origin = self.conv_cls_out(cls_feat)        # [B, A*K, H, W]
-
-        # -----------------------------
-        # BOX head (unchanged)
-        # -----------------------------
-        box_preds = self.conv_box(spatial_features_2d)        # [B, A*code, H, W]
+        cls_preds_origin = self.conv_cls(spatial_features_2d)  # [B, A*K, H, W]
+        box_preds = self.conv_box(spatial_features_2d)         # [B, A*code, H, W]
 
         # Permute to match OpenPCDet expected format
         cls_preds_origin = cls_preds_origin.permute(0, 2, 3, 1).contiguous()  # [B, H, W, A*K]
@@ -188,40 +127,38 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         cls_preds_hd = None  # [B,H,W,A*K] if computed
 
         # -----------------------------
-        # HD logits + fusion
+        # HD logits + fusion (Path-1 optimized)
         # -----------------------------
         if self.hd_enabled and (self.hd_core is not None):
-            # choose feature source for HD
-            if self.hd_feat_source == "cls":
-                feat_map = cls_feat
-                C_feat = feat_map.shape[1]
-            else:
-                feat_map = spatial_features_2d
-                C_feat = C_in
-
-            # We compute HD logits once per cell and repeat to anchors (memory-friendly).
+            # We compute HV/logits per CELL (B*H*W) once, then repeat to anchors.
+            # This avoids expanding to anchor-level and prevents OOM.
             with torch.no_grad():
                 # [B, C, H, W] -> [B, H, W, C] -> [B*H*W, C]
-                cell_feat = feat_map.permute(0, 2, 3, 1).contiguous()
-                feat_cell = cell_feat.view(-1, C_feat)
+                cell_feat = spatial_features_2d.permute(0, 2, 3, 1).contiguous()
+                feat_cell = cell_feat.view(-1, C_in)  # [B*H*W, C]
 
                 # HD logits per cell: [B*H*W, K]
-                logits_cell, hv_cell = self.hd_core.compute_hd_logits(feat_cell)
+                logits_cell, _hv_cell = self.hd_core.compute_hd_logits(feat_cell)
 
-                # reshape to [B, H, W, K]
+                # Reshape to [B, H, W, K]
                 logits_cell = logits_cell.view(B, H, W, K)
 
-                # repeat across anchors: [B,H,W,K] -> [B,H,W,A,K] -> [B,H,W,A*K]
+                # Repeat across anchors: [B,H,W,K] -> [B,H,W,A,K] -> [B,H,W,A*K]
                 cls_preds_hd = logits_cell.unsqueeze(3).expand(B, H, W, A, K).reshape(B, H, W, A * K).contiguous()
 
-                # fuse
+                # dtype safety: make sure both are float32 before fusing (avoid AMP edge cases)
+                cls_origin_f = cls_preds_origin.float()
+                cls_hd_f = cls_preds_hd.float()
+
                 cls_fused = self.hd_core.fuse_logits(
-                    logits_origin=self._as_float32(cls_preds_origin),
-                    logits_hd=self._as_float32(cls_preds_hd),
+                    logits_origin=cls_origin_f,
+                    logits_hd=cls_hd_f,
                     mode=self.hd_mode,
                     lam=self.hd_lambda
                 )
-                cls_preds_final = cls_fused  # keep float32 for safety
+
+                # Keep output dtype consistent with OpenPCDet expectation (float32 is safest)
+                cls_preds_final = cls_fused
 
         # Save outputs used by later stages
         self.forward_ret_dict['cls_preds'] = cls_preds_final
@@ -246,6 +183,8 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         # -----------------------------
         # Target assignment (GT labels)
         # -----------------------------
+        # Default: only in training.
+        # Optional (HD): run in eval as well IF GT exists and enabled.
         need_assign = self.training
         if (not self.training) and self.hd_enabled and self.hd_assign_targets_in_eval:
             if ('gt_boxes' in data_dict) and (data_dict['gt_boxes'] is not None):
@@ -255,17 +194,20 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             targets_dict = self.assign_targets(gt_boxes=data_dict['gt_boxes'])
             self.forward_ret_dict.update(targets_dict)
 
+            # For later online/buffer scripts:
+            # AnchorHeadTemplate losses and typical pipelines use:
+            #   - 'box_cls_labels' (shape [B, num_anchors])
+            #   - 'box_reg_targets'
+            # So if you need labels, use forward_ret_dict['box_cls_labels'].
+
             # Optional export for online update/debug:
-            # WARNING: exporting tensors can be large.
+            # WARNING: exporting tensors can be large. Here we export only cell-level features
+            # and shape meta so the runner can reconstruct per-cell or per-anchor consistently.
             if self.hd_enabled and self.hd_export_for_online:
-                # export BOTH sources so downstream scripts can choose consistently
-                data_dict['hd_bev_feat'] = spatial_features_2d.detach()  # [B, C_in, H, W]
-                data_dict['hd_cls_feat'] = cls_feat.detach()             # [B, C_cls, H, W]
-                data_dict['hd_shape_bev'] = (int(B), int(C_in), int(H), int(W))
-                data_dict['hd_shape_cls'] = (int(B), int(self.cls_feat_channels), int(H), int(W))
+                data_dict['hd_cell_feat'] = spatial_features_2d.detach()  # [B, C, H, W]
+                data_dict['hd_shape'] = (int(B), int(C_in), int(H), int(W))
                 data_dict['hd_num_anchors_per_loc'] = int(A)
                 data_dict['hd_num_classes'] = int(K)
-                data_dict['hd_feat_source'] = str(self.hd_feat_source)
 
         # -----------------------------
         # Decode predicted boxes (unchanged)

@@ -5,8 +5,6 @@ import os
 import re
 from pathlib import Path
 import warnings
-import logging
-import sys
 
 warnings.filterwarnings("ignore")
 
@@ -48,12 +46,6 @@ def parse_config():
     parser.add_argument("--chunk_cells", type=int, default=65536,
                         help="chunk size for cell features when encoding (avoid peak memory)")
 
-    # NEW: feature source for memory build (must match AnchorHeadSingle HD.FEAT_SOURCE)
-    parser.add_argument("--feat_source", type=str, default=None, choices=["auto", "bev", "cls"],
-                        help="Which feature to build HD memory from: "
-                             "'bev'=spatial_features_2d, 'cls'=hd_cls_feat. "
-                             "Default auto: use cfg.MODEL.DENSE_HEAD.HD.FEAT_SOURCE if exists else 'cls'.")
-
     args = parser.parse_args()
 
     cfg_from_yaml_file(args.cfg_file, cfg)
@@ -68,11 +60,13 @@ def parse_config():
 
 
 def _infer_epoch_id_from_ckpt(ckpt_path: str) -> str:
+    """Extract epoch id from checkpoint filename."""
     num_list = re.findall(r"\d+", ckpt_path)
     return num_list[-1] if len(num_list) > 0 else "no_number"
 
 
 def _get_num_anchors_per_loc(dense_head) -> int:
+    """Get anchors per spatial location from dense head."""
     if hasattr(dense_head, "num_anchors_per_location"):
         v = dense_head.num_anchors_per_location
         if isinstance(v, (list, tuple)):
@@ -83,181 +77,108 @@ def _get_num_anchors_per_loc(dense_head) -> int:
 
 @torch.no_grad()
 def _ensure_hd_memory_ready(dense_head, logger):
+    """
+    Ensure dense_head.hd_core and its memory exist.
+    """
     hd_core = getattr(dense_head, "hd_core", None)
     if hd_core is None:
         raise RuntimeError("dense_head.hd_core is None. Enable HD in cfg and rebuild model.")
     if not hasattr(hd_core, "embedder") or not hasattr(hd_core, "memory"):
-        raise RuntimeError("hd_core missing embedder/memory.")
+        raise RuntimeError("hd_core missing embedder/memory. Please use your HDCore implementation.")
     mem = hd_core.memory
     if not hasattr(mem, "classify_weights") or not hasattr(mem, "prototypes"):
         raise RuntimeError("hd_core.memory missing classify_weights/prototypes.")
-
-    logger.info(
-        f"HD memory tensors: classify_weights={tuple(mem.classify_weights.shape)}, "
-        f"prototypes={tuple(mem.prototypes.shape)}"
-    )
+    logger.info(f"HD memory tensors: classify_weights={tuple(mem.classify_weights.shape)}, prototypes={tuple(mem.prototypes.shape)}")
     return hd_core
-
-
-def _resolve_feat_source(args, cfg_local) -> str:
-    """
-    Priority:
-      1) CLI --feat_source if provided (and not auto)
-      2) cfg.MODEL.DENSE_HEAD.HD.FEAT_SOURCE if exists
-      3) default 'cls'
-    """
-    if args.feat_source is not None and args.feat_source != "auto":
-        return args.feat_source
-
-    try:
-        fs = str(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "FEAT_SOURCE", "cls")).lower()
-        if fs in ("bev", "cls"):
-            return fs
-    except Exception:
-        pass
-    return "cls"
-
-
-def _feat_key_from_source(feat_source: str) -> str:
-    if feat_source == "cls":
-        return "hd_cls_feat"
-    return "spatial_features_2d"
-
-
-@torch.no_grad()
-def _get_feat_tensor_after_forward(dense_head, batch_dict, model_ret, feat_key: str, logger):
-    """
-    Correct feature fetch order:
-      1) batch_dict mutated in-place by forward (best)
-      2) dense_head.forward_ret_dict (fallback)
-      3) search model_ret recursively ONLY if it actually contains feat_key tensor
-    """
-    # 1) batch_dict
-    if isinstance(batch_dict, dict) and (feat_key in batch_dict) and torch.is_tensor(batch_dict[feat_key]):
-        return batch_dict[feat_key]
-
-    # 2) head forward_ret_dict
-    frd = getattr(dense_head, "forward_ret_dict", None)
-    if isinstance(frd, dict) and (feat_key in frd) and torch.is_tensor(frd[feat_key]):
-        return frd[feat_key]
-
-    # 3) search model_ret (careful: model_ret may be recall dict!)
-    def _search(x):
-        if isinstance(x, dict):
-            if (feat_key in x) and torch.is_tensor(x[feat_key]):
-                return x[feat_key]
-            return None
-        if isinstance(x, (tuple, list)):
-            for it in x:
-                y = _search(it)
-                if y is not None:
-                    return y
-        return None
-
-    t = _search(model_ret)
-    if t is not None:
-        return t
-
-    # debug
-    keys = list(batch_dict.keys()) if isinstance(batch_dict, dict) else []
-    logger.error(
-        f"[FEAT] Cannot find feature '{feat_key}' in batch_dict/forward_ret_dict/model_ret. "
-        f"batch_dict keys(head)={keys[:60]}"
-    )
-    if isinstance(model_ret, dict):
-        logger.error(f"[FEAT] model_ret keys(head)={list(model_ret.keys())[:60]}")
-    return None
 
 
 @torch.no_grad()
 def _accumulate_from_batch_cell_level(
     dense_head,
-    feat_map_2d: torch.Tensor,
+    spatial_features_2d: torch.Tensor,
     box_cls_labels: torch.Tensor,
     anchors_per_loc: int,
     num_classes: int,
     chunk_cells: int,
+    logger=None
 ):
     """
-    Accumulate prototypes using CELL features (NO anchor expansion).
+    Accumulate prototypes using cell features (NO anchor feature expansion).
 
-    feat_map_2d:         [B, C, H, W]  (either spatial_features_2d or hd_cls_feat)
+    spatial_features_2d: [B, C, H, W]
     box_cls_labels:      [B, H*W*A]  (A fastest)
       - background: 0
       - ignored:    -1
       - positives:  1..K
+
+    We reshape labels -> [B, H*W, A], and for each anchor index a,
+    update memory using the SAME cell feature for anchors whose label is positive.
+
+    This matches AnchorHeadSingle (optimized) behavior:
+      - HD logits are computed per cell then repeated across anchors.
     """
     hd_core = dense_head.hd_core
     embedder = hd_core.embedder
     memory = hd_core.memory
 
-    assert feat_map_2d.dim() == 4
-    B, C, H, W = feat_map_2d.shape
+    assert spatial_features_2d.dim() == 4
+    B, C, H, W = spatial_features_2d.shape
     HW = H * W
     A = int(anchors_per_loc)
     K = int(num_classes)
 
     # [B, C, H, W] -> [B, H, W, C] -> [B, HW, C]
-    cell_feat = feat_map_2d.permute(0, 2, 3, 1).contiguous().view(B, HW, C)
+    cell_feat = spatial_features_2d.permute(0, 2, 3, 1).contiguous().view(B, HW, C)
 
     # labels [B, HW*A] -> [B, HW, A]
     if box_cls_labels.shape[1] != HW * A:
         raise RuntimeError(
             f"Label/feature mismatch: box_cls_labels={tuple(box_cls_labels.shape)}, expected second dim={HW*A}. "
-            f"Got H={H}, W={W}, A={A}. Check feature map stride / anchor order."
+            f"Got H={H}, W={W}, A={A}. Check anchor order / feature map stride."
         )
     labels_hw_a = box_cls_labels.view(B, HW, A).long()
 
     total_pos = 0
-    step = int(chunk_cells) if int(chunk_cells) > 0 else -1
 
+    # Update per anchor type to avoid repeating features
     for a in range(A):
-        lab = labels_hw_a[:, :, a]          # [B, HW]
-        pos_mask = lab > 0                 # positives only (1..K)
+        lab = labels_hw_a[:, :, a]  # [B, HW]
+        # mask positives (1..K), ignore 0 and -1
+        pos_mask = lab > 0
         if not pos_mask.any():
             continue
 
-        feat_sel = cell_feat[pos_mask]     # [Npos, C]
-        lab_sel = lab[pos_mask] - 1        # -> [0..K-1]
+        # gather selected cell features and labels
+        # feat_sel: [Npos, C], lab_sel: [Npos] in 1..K
+        feat_sel = cell_feat[pos_mask]                # advanced indexing flattens to [Npos, C]
+        lab_sel = lab[pos_mask] - 1                   # shift to 0..K-1
 
+        # Safety check
         if (lab_sel.min() < 0) or (lab_sel.max() >= K):
-            raise RuntimeError(
-                f"Shifted labels out of range: min={lab_sel.min().item()}, max={lab_sel.max().item()}, K={K}"
-            )
+            raise RuntimeError(f"Shifted labels out of range: min={lab_sel.min().item()}, max={lab_sel.max().item()}, K={K}")
 
+        # Encode in chunks to reduce peak memory
         Npos = feat_sel.shape[0]
-        if step <= 0:
-            step = Npos
+        if chunk_cells <= 0:
+            chunk_cells = Npos
 
         start = 0
         while start < Npos:
-            end = min(start + step, Npos)
+            end = min(start + chunk_cells, Npos)
             f_chunk = feat_sel[start:end]
             y_chunk = lab_sel[start:end]
 
-            hv = embedder(f_chunk)               # [n, HD_DIM]
-            memory.add_(y_chunk, hv, alpha=1.0)
+            hv = embedder(f_chunk)                   # [n, HD_DIM] (quantized if enabled)
+            memory.add_(y_chunk, hv, alpha=1.0)      # index_add_ update
 
             start = end
 
         total_pos += int(Npos)
 
+    # Normalize once per batch (cheaper than every add)
     memory.normalize_()
+
     return total_pos
-
-
-def _tensor_fingerprint(x: torch.Tensor, n: int = 16):
-    x = x.detach().float().flatten()
-    if x.numel() == 0:
-        return {"numel": 0}
-    idx = torch.linspace(0, x.numel() - 1, steps=min(n, x.numel())).long()
-    vals = x[idx].cpu().numpy().tolist()
-    return {
-        "numel": int(x.numel()),
-        "mean": float(x.mean().item()),
-        "std": float(x.std().item()),
-        "samples": vals,
-    }
 
 
 def main():
@@ -266,8 +187,9 @@ def main():
     # Distributed init (same as tools/test.py)
     if args.launcher == "none":
         dist = False
+        total_gpus = 1
     else:
-        _, cfg_local.LOCAL_RANK = getattr(common_utils, "init_dist_%s" % args.launcher)(
+        total_gpus, cfg_local.LOCAL_RANK = getattr(common_utils, "init_dist_%s" % args.launcher)(
             args.tcp_port, args.local_rank, backend="nccl"
         )
         dist = True
@@ -293,27 +215,17 @@ def main():
     log_file.parent.mkdir(parents=True, exist_ok=True)
     logger = common_utils.create_logger(log_file, rank=cfg_local.LOCAL_RANK)
 
-    # Also log to stdout
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.INFO)
-    logger.addHandler(sh)
-    logger.propagate = False
-    logger.info("[STDOUT] logger stream handler attached")
-
-    feat_source = _resolve_feat_source(args, cfg_local)
-    feat_key = _feat_key_from_source(feat_source)
-
     logger.info("********************** Start build_hd_memory.py **********************")
     logger.info(f"cfg_file: {args.cfg_file}")
     logger.info(f"ckpt: {args.ckpt}")
     logger.info(f"save_path: {str(save_path)}")
     logger.info(f"batch_size: {args.batch_size}, workers: {args.workers}, launcher: {args.launcher}")
     logger.info(f"max_batches: {args.max_batches}, use_fp16: {args.use_fp16}, chunk_cells: {args.chunk_cells}")
-    logger.info(f"feat_source: {feat_source}  -> feat_key='{feat_key}'")
     log_config_to_file(cfg_local, logger=logger)
 
     # Build TRAIN split dataloader
-    train_set, train_loader, _sampler = build_dataloader(
+    # Using training=True means using train split; may include augmentation (depends on cfg).
+    train_set, train_loader, sampler = build_dataloader(
         dataset_cfg=cfg_local.DATA_CONFIG,
         class_names=cfg_local.CLASS_NAMES,
         batch_size=args.batch_size,
@@ -337,10 +249,12 @@ def main():
     logger.info(f"anchors_per_loc: {anchors_per_loc}, num_classes: {num_classes}")
 
     hd_core = _ensure_hd_memory_ready(dense_head, logger)
+    # reset memory before accumulation
     hd_core.memory.reset()
 
     total_pos = 0
     total_seen = 0
+
     use_autocast = bool(args.use_fp16)
 
     with torch.no_grad():
@@ -348,7 +262,7 @@ def main():
             if args.max_batches > 0 and it >= args.max_batches:
                 break
 
-            # Move to GPU
+            # Move to GPU using repo helper if exists
             try:
                 from pcdet.models import load_data_to_gpu as _load_data_to_gpu
                 _load_data_to_gpu(batch_dict)
@@ -357,132 +271,81 @@ def main():
                     if torch.is_tensor(v):
                         batch_dict[k] = v.cuda(non_blocking=True)
 
-            # Forward once
+            # Forward once. Many OpenPCDet-style models mutate batch_dict in-place.
             if use_autocast:
                 with torch.cuda.amp.autocast(enabled=True):
                     model_ret = model(batch_dict)
             else:
                 model_ret = model(batch_dict)
 
-            # ---- fetch feature map correctly ----
-            feat_map = _get_feat_tensor_after_forward(dense_head, batch_dict, model_ret, feat_key, logger)
-            if feat_map is None:
-                if cfg_local.LOCAL_RANK == 0 and it == 0:
-                    logger.error(f"[FEAT] FAIL: feat_source={feat_source}, feat_key={feat_key}")
-                    logger.error(f"[FEAT] batch_dict keys(head)={list(batch_dict.keys())[:80]}")
-                    frd = getattr(dense_head, "forward_ret_dict", None)
-                    if isinstance(frd, dict):
-                        logger.error(f"[FEAT] dense_head.forward_ret_dict keys(head)={list(frd.keys())[:80]}")
-                raise RuntimeError(f"Cannot find feature '{feat_key}' for feat_source={feat_source}.")
+            if cfg_local.LOCAL_RANK == 0:
+                logger.info(f"type(model_return)={type(model_ret)} keys_in_batch_dict={list(batch_dict.keys())[:30]}")
 
-            # ---- get gt_boxes ----
-            gt_boxes = batch_dict.get("gt_boxes", None)
+            # Prefer the mutated batch_dict
+            data_dict = batch_dict
+
+            # Fallback: if batch_dict wasn't populated, try dict-like object inside model_ret
+            if "spatial_features_2d" not in data_dict:
+                if isinstance(model_ret, dict):
+                    data_dict = model_ret
+                elif isinstance(model_ret, (tuple, list)):
+                    for item in model_ret:
+                        if isinstance(item, dict) and "spatial_features_2d" in item:
+                            data_dict = item
+                            break
+
+            spatial = data_dict.get("spatial_features_2d", None)
+            if spatial is None:
+                raise RuntimeError(
+                    "Cannot find 'spatial_features_2d'. "
+                    "Model forward did not populate it in batch_dict nor return a dict containing it."
+                )
+
+            gt_boxes = data_dict.get("gt_boxes", None)
             if gt_boxes is None:
-                raise RuntimeError("Cannot find 'gt_boxes' in batch_dict. Cannot assign anchor labels.")
+                gt_boxes = batch_dict.get("gt_boxes", None)
+            if gt_boxes is None:
+                raise RuntimeError("Cannot find 'gt_boxes' in data_dict/batch_dict. Cannot assign anchor labels.")
 
-            # ---- assign targets ----
             targets = dense_head.assign_targets(gt_boxes=gt_boxes)
             if "box_cls_labels" not in targets:
                 raise RuntimeError("assign_targets() output has no key 'box_cls_labels'.")
 
+
             box_cls_labels = targets["box_cls_labels"]  # [B, num_anchors]
-
-            # ---- label sanity log: only first 2 iters ----
-            if it < 2 and cfg_local.LOCAL_RANK == 0:
-                lab = box_cls_labels
-                u = torch.unique(lab)
-                logger.info(
-                    f"[LABEL] box_cls_labels shape={tuple(lab.shape)} "
-                    f"min={lab.min().item()} max={lab.max().item()} unique={u.tolist()}"
-                )
-                logger.info(
-                    f"[LABEL] counts: ignore(-1)={(lab==-1).sum().item()} "
-                    f"bg(0)={(lab==0).sum().item()} pos(>0)={(lab>0).sum().item()}"
-                )
-                if (lab > 0).any():
-                    lab_shift = lab[lab > 0] - 1
-                    logger.info(
-                        f"[LABEL] shifted_pos_labels (lab-1): "
-                        f"min={lab_shift.min().item()} max={lab_shift.max().item()} "
-                        f"expected_range=[0,{num_classes-1}]"
-                    )
-                logger.info(f"[FEAT] using {feat_key}: shape={tuple(feat_map.shape)} dtype={feat_map.dtype} device={feat_map.device}")
-
             cared = box_cls_labels.view(-1) >= 0
             total_seen += int(cared.sum().item())
 
             pos_added = _accumulate_from_batch_cell_level(
                 dense_head=dense_head,
-                feat_map_2d=feat_map,
+                spatial_features_2d=spatial,
                 box_cls_labels=box_cls_labels,
                 anchors_per_loc=anchors_per_loc,
                 num_classes=num_classes,
                 chunk_cells=int(args.chunk_cells),
+                logger=logger
             )
             total_pos += int(pos_added)
 
-            if cfg_local.LOCAL_RANK == 0 and ((it + 1) % 200 == 0):
+            if (it + 1) % 20 == 0 and cfg_local.LOCAL_RANK == 0:
                 logger.info(f"[Iter {it+1}] accumulated_pos={total_pos}, total_seen={total_seen}")
 
-    # Final normalize + sanity
+    # Final normalize
     hd_core.memory.normalize_()
 
-    if cfg_local.LOCAL_RANK == 0:
-        mem = hd_core.memory
-        try:
-            logger.info(
-                f"[MEM] proto_norm_mean={mem.prototypes.norm(dim=1).mean().item():.6f}, "
-                f"w_norm_mean={mem.classify_weights.norm(dim=1).mean().item():.6f}"
-            )
-        except Exception:
-            pass
-
-    # ---------------- Save FULL payload (embedder + memory) ----------------
-    embedder_sd = None
-    try:
-        embedder_sd = hd_core.embedder.state_dict()
-    except Exception as e:
-        logger.warning(f"[SAVE] cannot get embedder.state_dict(): {repr(e)}")
-
-    memory_sd = None
-    try:
-        memory_sd = hd_core.memory.state_dict()
-    except Exception as e:
-        logger.warning(f"[SAVE] cannot get memory.state_dict(): {repr(e)}")
-
-    proj_fp = None
-    try:
-        if hasattr(hd_core.embedder, "projection") and hasattr(hd_core.embedder.projection, "weight"):
-            proj_fp = _tensor_fingerprint(hd_core.embedder.projection.weight, n=16)
-    except Exception:
-        proj_fp = None
-
     save_obj = {
-        "embedder": embedder_sd,
-        "memory": memory_sd,
         "classify_weights": hd_core.memory.classify_weights.detach().float().cpu(),
         "prototypes": hd_core.memory.prototypes.detach().float().cpu(),
         "meta": {
-            "source": f"hd_core.memory (cell-level accumulation, repeated to anchors) | feat_source={feat_source}",
-            "feat_source": feat_source,
-            "feat_key": feat_key,
-            "num_classes": int(num_classes),
+            "source": "hd_core.memory (cell-level accumulation, repeated to anchors)",
+            "num_classes": num_classes,
             "anchors_per_loc": int(anchors_per_loc),
             "ckpt": args.ckpt,
             "cfg_file": args.cfg_file,
             "epoch_id": epoch_id,
             "total_pos_anchors": int(total_pos),
             "total_seen_anchors": int(total_seen),
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "hd_cfg": {
-                "HD_DIM": int(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "HD_DIM", -1)),
-                "ENCODER": str(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "ENCODER", "unknown")),
-                "QUANTIZE": bool(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "QUANTIZE", False)),
-                "TEMPERATURE": float(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "TEMPERATURE", 1.0)),
-                "SEED": int(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "SEED", 0)),
-                "FEAT_SOURCE": str(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "FEAT_SOURCE", feat_source)),
-            },
-            "projection_fingerprint": proj_fp,
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     }
 

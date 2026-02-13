@@ -222,7 +222,7 @@ class HDEmbedder(nn.Module):
         return self.nonlinear(feat)  # [N, D]
 
     @torch.no_grad()
-    def forward(self, feat: torch.Tensor, quantize: Optional[bool] = None) -> torch.Tensor:
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
         """
         Args:
             feat: [N, C] float features
@@ -242,24 +242,23 @@ class HDEmbedder(nn.Module):
         else:
             raise RuntimeError("Unreachable")
 
-        do_q = self.quantize if quantize is None else bool(quantize)
-        if do_q:
+        if self.quantize:
             _hard_quantize_inplace(hv)
         return hv
 
     @torch.no_grad()
-    def forward_chunked(self, feat: torch.Tensor, chunk: int = 8192, quantize: Optional[bool] = None) -> torch.Tensor:
+    def forward_chunked(self, feat: torch.Tensor, chunk: int = 8192) -> torch.Tensor:
         """
         Chunked encoding to prevent OOM.
         """
         if chunk is None or chunk <= 0 or feat.shape[0] <= chunk:
-            return self.forward(feat, quantize=quantize)
+            return self.forward(feat)
 
         outs = []
         N = feat.shape[0]
         for s in range(0, N, chunk):
             e = min(s + chunk, N)
-            outs.append(self.forward(feat[s:e], quantize=quantize))
+            outs.append(self.forward(feat[s:e]))
         return torch.cat(outs, dim=0)
 
 
@@ -279,7 +278,7 @@ class HDMemory(nn.Module):
         self.num_classes = int(num_classes)
         self.hd_dim = int(hd_dim)
 
-        w = torch.zeros(self.num_classes, self.hd_dim, dtype=torch.float32)
+        w = torch.zeros(self.num_classes, self.hd_dim)
         self.register_buffer("classify_weights", w, persistent=True)
         p = torch.zeros_like(w)
         self.register_buffer("prototypes", p, persistent=True)
@@ -535,18 +534,13 @@ class HDCore(nn.Module):
             feat_chunk = feat_mid[s:e]
 
             # Encode to hv (on GPU)
-            hv = self.embedder.forward(feat_chunk, quantize=self.cfg.quantize) 
-
+            hv = self.embedder.forward(feat_chunk)
 
             # NOTE: embedder.forward already quantizes; if you moved quantize out, call _hard_quantize_inplace here
             # _hard_quantize_inplace(hv)
 
             # Compute logits for this chunk, immediately
-            logits = self.memory.logits(
-                hv,
-                temperature=float(self.cfg.temperature),
-                chunk=int(self.cfg.logits_chunk) if int(self.cfg.logits_chunk) > 0 else 0
-            )
+            logits = self.memory.logits(hv, temperature=self.cfg.temperature, chunk=0)  # chunk=0 OK (chunk size is small)
 
             out_logits.append(logits)
 
@@ -725,7 +719,7 @@ class HDCore(nn.Module):
         if pos_feat.numel() == 0:
             return
 
-        hv = self.embedder.forward_chunked(pos_feat, chunk=int(self.cfg.encode_chunk), quantize=self.cfg.quantize)
+        hv = self.embedder.forward_chunked(pos_feat, chunk=int(self.cfg.encode_chunk))
         pred = pos_logits.argmax(dim=1).long()
         wrong = pred != pos_labels
         if wrong.sum().item() == 0:

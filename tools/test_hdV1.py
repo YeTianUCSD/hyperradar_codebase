@@ -1,3 +1,4 @@
+
 # HD fixed-memory evaluation script (no online updates)
 # - Loads a baseline detector checkpoint
 # - Optionally loads a pre-built HD memory (.pth) into dense_head.hd_core.memory
@@ -7,11 +8,8 @@
 #  1) "dict has no seek" bug: NEVER passes a dict into hd_core.load_memory(path)
 #  2) Supports BOTH memory formats:
 #     A) hd_core.save_memory() payload: {"embedder":..., "memory":..., "cfg":..., "_update_counter":...}
-#     B) build_hd_memory.py payload: {"classify_weights":..., "prototypes":..., "meta"...}
+#     B) build_hd_memory.py payload: {"classify_weights":..., "prototypes":..., "counts"/"meta"...}
 #  3) Applies runtime overrides to the correct places (dense_head.hd_mode / dense_head.hd_lambda)
-#  4) (NEW) Sync hd_core.cfg from payload meta["hd_cfg"] when available (consistency!)
-#  5) (NEW) Adds feat_dim sanity logging for cls_feat pipeline
-#  6) (NEW) Adds --hd_quantize override (0/1) to force quantize on/off at runtime
 # --------------------------------------------------------
 
 import _init_path
@@ -35,7 +33,6 @@ from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_f
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network
 from pcdet.utils import common_utils
-
 
 def _fmt_secs(sec: float) -> str:
     sec = float(sec)
@@ -80,9 +77,6 @@ def parse_config():
                         help='Override HD mode at runtime.')
     parser.add_argument('--hd_lambda', type=float, default=None,
                         help='Override fusion lambda at runtime (only meaningful for fused).')
-    # (NEW) quantize override to debug quantization mismatch
-    parser.add_argument('--hd_quantize', type=int, default=None, choices=[0, 1],
-                        help='Override hd_core.cfg.quantize at runtime (0/1). If None, keep payload/cfg.')
 
     args = parser.parse_args()
 
@@ -106,47 +100,6 @@ def _copy_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
     dst.data.copy_(src2)
 
 
-def _sync_hd_cfg_from_payload_meta(hd_core, payload: dict, logger):
-    """
-    (NEW) Sync a few critical runtime fields in hd_core.cfg using build_hd_memory.py payload meta.
-    This prevents mismatches like quantize/temperature/encoder/hd_dim.
-    """
-    try:
-        if hd_core is None or not hasattr(hd_core, "cfg") or not isinstance(payload, dict):
-            return
-
-        meta = payload.get("meta", None)
-        if not isinstance(meta, dict):
-            return
-
-        hd_meta = meta.get("hd_cfg", None)
-        if not isinstance(hd_meta, dict):
-            return
-
-        # only override fields that exist
-        if "QUANTIZE" in hd_meta:
-            hd_core.cfg.quantize = bool(hd_meta["QUANTIZE"])
-        if "TEMPERATURE" in hd_meta:
-            hd_core.cfg.temperature = float(hd_meta["TEMPERATURE"])
-        if "ENCODER" in hd_meta:
-            hd_core.cfg.encoder = str(hd_meta["ENCODER"]).lower()
-        if "HD_DIM" in hd_meta:
-            hd_core.cfg.hd_dim = int(hd_meta["HD_DIM"])
-        if "SEED" in hd_meta:
-            hd_core.cfg.seed = int(hd_meta["SEED"])
-
-        logger.info(
-            "[HD] Synced hd_core.cfg from payload meta: "
-            f"encoder={getattr(hd_core.cfg, 'encoder', 'NA')}, "
-            f"quantize={getattr(hd_core.cfg, 'quantize', 'NA')}, "
-            f"temp={getattr(hd_core.cfg, 'temperature', 'NA')}, "
-            f"hd_dim={getattr(hd_core.cfg, 'hd_dim', 'NA')}, "
-            f"seed={getattr(hd_core.cfg, 'seed', 'NA')}"
-        )
-    except Exception as e:
-        logger.warning(f"[HD] Failed syncing hd_core.cfg from payload meta: {repr(e)}")
-
-
 def _load_hd_payload_into_core(hd_core, payload: dict, logger) -> bool:
     """
     Load either:
@@ -159,7 +112,7 @@ def _load_hd_payload_into_core(hd_core, payload: dict, logger) -> bool:
 
     loaded_any = False
 
-    # Case A: full payload from hd_core.save_memory() or build_hd_memory full payload
+    # Case A: full payload from hd_core.save_memory()
     if ("embedder" in payload) or ("memory" in payload):
         try:
             if "embedder" in payload and hasattr(hd_core, "embedder"):
@@ -179,9 +132,6 @@ def _load_hd_payload_into_core(hd_core, payload: dict, logger) -> bool:
                 hd_core.memory.normalize_()
         except Exception:
             pass
-
-        # (NEW) Sync cfg from meta if present
-        _sync_hd_cfg_from_payload_meta(hd_core, payload, logger)
 
         return loaded_any
 
@@ -219,9 +169,6 @@ def _load_hd_payload_into_core(hd_core, payload: dict, logger) -> bool:
     except Exception:
         pass
 
-    # (NEW) Sync cfg from meta if present
-    _sync_hd_cfg_from_payload_meta(hd_core, payload, logger)
-
     return loaded_any
 
 
@@ -230,7 +177,6 @@ def _apply_hd_overrides_and_load_memory(model, args, logger):
     Inference-time setup only (NO online updates).
       1) Load fixed HD memory/prototypes into dense_head.hd_core.memory
       2) Override hd_mode / hd_lambda at runtime (dense_head.hd_mode / dense_head.hd_lambda)
-      3) (NEW) Override hd_core.cfg.quantize if provided
 
     Key fix:
       - We NEVER pass a dict into hd_core.load_memory(), because your hd_core.load_memory()
@@ -287,17 +233,6 @@ def _apply_hd_overrides_and_load_memory(model, args, logger):
                     if pr.abs().max().item() < 1e-6:
                         logger.warning("[HD-CHECK] prototypes are ~0 (max abs < 1e-6) -> HD will fail.")
 
-                    # ---- (NEW) Feature-dim sanity log for cls_feat pipeline ----
-                    try:
-                        feat_dim = getattr(getattr(hd_core, "embedder", None), "feat_dim", None)
-                        if feat_dim is not None:
-                            logger.info(
-                                f"[HD-CHECK] hd_core.embedder.feat_dim = {feat_dim} "
-                                f"(must match your hd_cls_feat channels if you use cls_feat->HD)"
-                            )
-                    except Exception:
-                        pass
-
                 except Exception as e:
                     logger.warning(f"[HD-CHECK] sanity check failed: {repr(e)}")
 
@@ -306,6 +241,7 @@ def _apply_hd_overrides_and_load_memory(model, args, logger):
                     "[HD] Failed to load memory payload into hd_core. "
                     "Expected keys: (embedder/memory) OR (classify_weights/prototypes)."
                 )
+
 
             # Extra logging
             try:
@@ -332,14 +268,6 @@ def _apply_hd_overrides_and_load_memory(model, args, logger):
         else:
             logger.warning("[HD] dense_head has no attribute hd_lambda; cannot override lambda.")
 
-    # ---- 3) (NEW) Override quantize ----
-    if args.hd_quantize is not None:
-        if hd_core is not None and hasattr(hd_core, "cfg"):
-            hd_core.cfg.quantize = bool(int(args.hd_quantize))
-            logger.info(f"[HD] Override hd_core.cfg.quantize = {hd_core.cfg.quantize}")
-        else:
-            logger.warning("[HD] Cannot override hd_quantize: hd_core or hd_core.cfg missing.")
-
 
 def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False):
     t0 = time.perf_counter()
@@ -358,7 +286,7 @@ def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id
 
     # HD fixed-memory setup (no updates)
     t_hd0 = time.perf_counter()
-    if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None or args.hd_quantize is not None:
+    if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None:
         _apply_hd_overrides_and_load_memory(model, args, logger)
     torch.cuda.synchronize()
     t_hd1 = time.perf_counter()
@@ -380,6 +308,7 @@ def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id
         f"eval_one_epoch={_fmt_secs(t_eval1 - t_eval0)} | "
         f"TOTAL={_fmt_secs(t1 - t0)}"
     )
+
 
 
 def get_no_evaluated_ckpt(ckpt_dir, ckpt_record_file, args):
@@ -434,12 +363,12 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
         model.cuda()
 
         # HD fixed-memory setup (no updates)
-        if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None or args.hd_quantize is not None:
+        if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None:
             _apply_hd_overrides_and_load_memory(model, args, logger)
 
         # start evaluation
         cur_result_dir = eval_output_dir / ('epoch_%s' % cur_epoch_id) / cfg.DATA_CONFIG.DATA_SPLIT['test']
-
+        
         t_epoch0 = time.perf_counter()
         tb_dict = eval_utils.eval_one_epoch(
             cfg, args, model, test_loader, cur_epoch_id, logger, dist_test=dist_test,
@@ -448,6 +377,7 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
         torch.cuda.synchronize()
         t_epoch1 = time.perf_counter()
         logger.info(f"[TIME] epoch_{cur_epoch_id} eval_one_epoch={_fmt_secs(t_epoch1 - t_epoch0)}")
+
 
         if cfg.LOCAL_RANK == 0:
             for key, val in tb_dict.items():
