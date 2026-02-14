@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 '''
 python /home/code/hyperradar/hyperradar_codebase/tools/visualization/draw_evalResults.py \
-  --log /home/code/hyperradar/hyperradar_codebase/runs/logs/eval_100epoch20260203-100632.log \
-  --out /home/code/hyperradar/hyperradar_codebase/runs/logs/recall_rcnn_curve_upto100.png \
+  --log /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd_retrain_hdonly/run500_cls_retrain_hd_stage2/retrain_stage2_hdonly_from_fused_epoch9_2026-02-14_052951.log \
+  --out /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd_retrain_hdonly/run500_cls_retrain_hd_stage2/retrainHD_hdonly15_rcnn.png \
   --show
 '''
 import re
