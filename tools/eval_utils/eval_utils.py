@@ -212,6 +212,44 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     with open(result_dir / 'result.pkl', 'wb') as f:
         pickle.dump(det_annos, f)
 
+    if getattr(args, 'fast_recall_only', False):
+        logger.info('*************** FAST_RECALL_ONLY: skip dataset.evaluation() *****************')
+        quick_path = result_dir / 'metrics_recall_only.json'
+        quick_obj = {
+            'recall': {
+                f'roi_{k}': float(ret_dict[f'recall/roi_{k}'])
+                for k in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST
+            },
+            'recall_rcnn': {
+                f'rcnn_{k}': float(ret_dict[f'recall/rcnn_{k}'])
+                for k in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST
+            },
+            'avg_pred_objects': float(total_pred_objects / max(1, len(det_annos))),
+            'num_samples': int(len(det_annos))
+        }
+        with open(quick_path, 'w') as f:
+            json.dump(quick_obj, f, indent=2)
+        logger.info('Saved recall-only metrics to %s' % str(quick_path))
+
+        t_total1 = time.perf_counter()
+        total_s = t_total1 - t_total0
+        n_iter = max(1, len(dataloader))
+        avg_wait = t_dataloader_wait / n_iter
+        avg_to = t_to_gpu / n_iter
+        avg_fw = t_forward / n_iter
+        avg_gp = t_gen_pred / n_iter
+        logger.info(
+            f"[TIME-SUM] wait={t_dataloader_wait:.2f}s (avg {avg_wait:.4f}s/it) | "
+            f"to_gpu={t_to_gpu:.2f}s (avg {avg_to:.4f}s/it) | "
+            f"forward={t_forward:.2f}s (avg {avg_fw:.4f}s/it) | "
+            f"gen_pred={t_gen_pred:.2f}s (avg {avg_gp:.4f}s/it) | "
+            f"eval_metric=SKIPPED | "
+            f"TOTAL={total_s:.2f}s ({total_s/60.0:.2f}min)"
+        )
+        logger.info('Result is saved to %s' % result_dir)
+        logger.info('****************Evaluation done.*****************')
+        return ret_dict
+
     # -------------------- evaluation metric timing --------------------
     logger.info('*************** Running dataset.evaluation() *****************')
     logger.info('EVAL_METRIC=%s' % str(cfg.MODEL.POST_PROCESSING.get('EVAL_METRIC', None)))

@@ -83,6 +83,10 @@ def parse_config():
     # (NEW) quantize override to debug quantization mismatch
     parser.add_argument('--hd_quantize', type=int, default=None, choices=[0, 1],
                         help='Override hd_core.cfg.quantize at runtime (0/1). If None, keep payload/cfg.')
+    parser.add_argument('--hd_temperature', type=float, default=None,
+                        help='Override hd_core.cfg.temperature at runtime. Applied after memory load/meta sync.')
+    parser.add_argument('--fast_recall_only', action='store_true', default=False,
+                        help='Fast mode: compute recall/pred-count only, skip slow dataset.evaluation/AP.')
 
     args = parser.parse_args()
 
@@ -339,6 +343,14 @@ def _apply_hd_overrides_and_load_memory(model, args, logger):
             logger.info(f"[HD] Override hd_core.cfg.quantize = {hd_core.cfg.quantize}")
         else:
             logger.warning("[HD] Cannot override hd_quantize: hd_core or hd_core.cfg missing.")
+
+    # ---- 4) (NEW) Override temperature ----
+    if args.hd_temperature is not None:
+        if hd_core is not None and hasattr(hd_core, "cfg"):
+            hd_core.cfg.temperature = float(args.hd_temperature)
+            logger.info(f"[HD] Override hd_core.cfg.temperature = {hd_core.cfg.temperature}")
+        else:
+            logger.warning("[HD] Cannot override hd_temperature: hd_core or hd_core.cfg missing.")
 
 
 def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False):

@@ -95,6 +95,7 @@ MODEL:
             HD_DIM: 10000
             QUANTIZE: True
             TEMPERATURE: 1.0
+            ANCHOR_ID_SCALE: 1.0
             SEED: 0
 
             # TorchHD / memory compute safety knobs (avoid OOM)

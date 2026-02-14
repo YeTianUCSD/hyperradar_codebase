@@ -234,6 +234,14 @@ def _accumulate_from_batch_cell_level(
             end = min(start + step, Npos)
             f_chunk = feat_sel[start:end]
             y_chunk = lab_sel[start:end]
+            a_chunk = torch.full_like(y_chunk, fill_value=int(a), dtype=torch.long)
+
+            # Keep memory-build feature mapping consistent with inference-time HD logits.
+            f_chunk = hd_core.inject_anchor_context(
+                feat_mid=f_chunk,
+                anchor_ids=a_chunk,
+                num_anchors=A
+            )
 
             hv = embedder(f_chunk)               # [n, HD_DIM]
             memory.add_(y_chunk, hv, alpha=1.0)

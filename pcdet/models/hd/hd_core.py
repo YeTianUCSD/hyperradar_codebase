@@ -87,6 +87,7 @@ class HDConfig:
     # Memory build / inference safety
     encode_chunk: int = 8192         # chunk size for encoding anchors
     logits_chunk: int = 8192         # chunk size for computing logits from hv
+    anchor_id_scale: float = 0.0     # >0 enables anchor-aware feature context injection
 
 
 # -----------------------------
@@ -484,6 +485,7 @@ class HDCore(nn.Module):
         randomness = float(_safe_get(enc_cfg, "RANDOMNESS", 0.0))
         encode_chunk = int(_safe_get(enc_cfg, "ENCODE_CHUNK", 8192))
         logits_chunk = int(_safe_get(enc_cfg, "LOGITS_CHUNK", 8192))
+        anchor_id_scale = float(_safe_get(hd_cfg, "ANCHOR_ID_SCALE", 0.0))
 
         cfg = HDConfig(
             enabled=enabled,
@@ -508,8 +510,41 @@ class HDCore(nn.Module):
             randomness=randomness,
             encode_chunk=encode_chunk,
             logits_chunk=logits_chunk,
+            anchor_id_scale=anchor_id_scale,
         )
         return HDCore(cfg)
+
+    @torch.no_grad()
+    def inject_anchor_context(
+        self,
+        feat_mid: torch.Tensor,
+        anchor_ids: torch.Tensor,
+        num_anchors: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Add a lightweight, deterministic anchor-id context into features so anchors at the same
+        cell are no longer forced to share exactly the same HD logits.
+        """
+        scale = float(getattr(self.cfg, "anchor_id_scale", 0.0))
+        if scale <= 0.0:
+            return feat_mid
+
+        assert feat_mid.dim() == 2, f"Expected feat_mid [N, C], got {tuple(feat_mid.shape)}"
+        assert anchor_ids.dim() == 1, f"Expected anchor_ids [N], got {tuple(anchor_ids.shape)}"
+        assert feat_mid.shape[0] == anchor_ids.shape[0], \
+            f"N mismatch: feat_mid={feat_mid.shape[0]}, anchor_ids={anchor_ids.shape[0]}"
+
+        N, C = feat_mid.shape
+        out = feat_mid.clone()
+        a = anchor_ids.long()
+        if num_anchors is not None and int(num_anchors) > 0:
+            a = torch.remainder(a, int(num_anchors))
+
+        # Map each anchor id to a stable feature channel index.
+        cols = torch.remainder(a, C)
+        rows = torch.arange(N, device=out.device)
+        out[rows, cols] = out[rows, cols] + scale
+        return out
 
     @torch.no_grad()
     def compute_hd_logits(self, feat_mid: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
