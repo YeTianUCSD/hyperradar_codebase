@@ -109,6 +109,8 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
         # If True, store origin/hd logits into forward_ret_dict for analysis
         self.hd_debug_save_logits = False
+        # If True, allow gradients through HD path during training.
+        self.hd_train_use_grad = False
 
         # Which feature map does HD use?
         #   - "bev": spatial_features_2d
@@ -123,6 +125,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
             self.hd_assign_targets_in_eval = bool(hd_cfg.get("ASSIGN_TARGETS_IN_EVAL", False))
             self.hd_export_for_online = bool(hd_cfg.get("EXPORT_FOR_ONLINE", False))
             self.hd_debug_save_logits = bool(hd_cfg.get("DEBUG_SAVE_LOGITS", False))
+            self.hd_train_use_grad = bool(hd_cfg.get("TRAIN_USE_GRAD", False))
 
             # NEW: feature source for HD
             self.hd_feat_source = str(hd_cfg.get("FEAT_SOURCE", "bev")).lower()
@@ -200,7 +203,8 @@ class AnchorHeadSingle(AnchorHeadTemplate):
                 C_feat = C_in
 
             # Compute HD logits per anchor (anchor-aware): [B,H,W,A,C] -> [B,H,W,A,K]
-            with torch.no_grad():
+            use_grad_for_hd = bool(self.training and self.hd_train_use_grad)
+            with torch.set_grad_enabled(use_grad_for_hd):
                 # [B, C, H, W] -> [B, H, W, C] -> [B*H*W, C]
                 cell_feat = feat_map.permute(0, 2, 3, 1).contiguous()
                 feat_anchor = cell_feat.unsqueeze(3).expand(B, H, W, A, C_feat).reshape(-1, C_feat)

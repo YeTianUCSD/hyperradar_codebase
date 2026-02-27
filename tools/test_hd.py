@@ -138,6 +138,14 @@ def _sync_hd_cfg_from_payload_meta(hd_core, payload: dict, logger):
             hd_core.cfg.hd_dim = int(hd_meta["HD_DIM"])
         if "SEED" in hd_meta:
             hd_core.cfg.seed = int(hd_meta["SEED"])
+        if "BG_ENABLED" in hd_meta:
+            hd_core.cfg.bg_enabled = bool(hd_meta["BG_ENABLED"])
+        if "BG_MARGIN_SCALE" in hd_meta:
+            hd_core.cfg.bg_margin_scale = float(hd_meta["BG_MARGIN_SCALE"])
+        if "BG_SAMPLE_RATIO" in hd_meta:
+            hd_core.cfg.bg_sample_ratio = float(hd_meta["BG_SAMPLE_RATIO"])
+        if "BG_MIN_PER_ANCHOR" in hd_meta:
+            hd_core.cfg.bg_min_per_anchor = int(hd_meta["BG_MIN_PER_ANCHOR"])
 
         logger.info(
             "[HD] Synced hd_core.cfg from payload meta: "
@@ -212,6 +220,18 @@ def _load_hd_payload_into_core(hd_core, payload: dict, logger) -> bool:
             if loaded_any and hasattr(mem, "normalize_"):
                 mem.normalize_()
                 logger.info("[HD] Prototypes missing; normalized from classify_weights.")
+
+        if "bg_weight" in payload and hasattr(mem, "bg_weight"):
+            _copy_tensor_inplace(mem.bg_weight, payload["bg_weight"])
+            loaded_any = True
+            logger.info(f"[HD] Loaded bg_weight into hd_core.memory.bg_weight "
+                        f"shape={tuple(mem.bg_weight.shape)}")
+
+        if "bg_prototype" in payload and payload["bg_prototype"] is not None and hasattr(mem, "bg_prototype"):
+            _copy_tensor_inplace(mem.bg_prototype, payload["bg_prototype"])
+            loaded_any = True
+            logger.info(f"[HD] Loaded bg_prototype into hd_core.memory.bg_prototype "
+                        f"shape={tuple(mem.bg_prototype.shape)}")
     except Exception as e:
         logger.warning(f"[HD] Failed loading classify_weights/prototypes: {repr(e)}")
         return False
@@ -370,7 +390,7 @@ def eval_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id
 
     # HD fixed-memory setup (no updates)
     t_hd0 = time.perf_counter()
-    if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None or args.hd_quantize is not None:
+    if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None or args.hd_quantize is not None or args.hd_temperature is not None:
         _apply_hd_overrides_and_load_memory(model, args, logger)
     torch.cuda.synchronize()
     t_hd1 = time.perf_counter()
@@ -446,7 +466,7 @@ def repeat_eval_ckpt(model, test_loader, args, eval_output_dir, logger, ckpt_dir
         model.cuda()
 
         # HD fixed-memory setup (no updates)
-        if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None or args.hd_quantize is not None:
+        if args.hd_memory is not None or args.hd_mode is not None or args.hd_lambda is not None or args.hd_quantize is not None or args.hd_temperature is not None:
             _apply_hd_overrides_and_load_memory(model, args, logger)
 
         # start evaluation

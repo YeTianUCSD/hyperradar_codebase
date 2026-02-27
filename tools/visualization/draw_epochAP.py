@@ -4,9 +4,9 @@
 """
 Example:
 python /home/code/hyperradar/hyperradar_codebase/tools/visualization/draw_epochAP.py \
-  --log /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd_retrain_hdonly/run500_cls_retrain_hd_stage2/retrain_stage2_hdonly_from_fused_epoch9_2026-02-14_052951.log \
-  --out /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd_retrain_hdonly/run500_cls_retrain_hd_stage2/retrainHD_hdonly15_AP.png \
-  --epoch_min 1 --epoch_max 20 \
+  --log /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd_retrain_hdonly/run500_cls_retrain_hd/retrain_hdonly_from_CNN_checkpoint_epoch17_2026-02-14_120548.log \
+  --out /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd_retrain_hdonly/run500_cls_retrain_hd/retrainHD_hdonlyepoch50_AP.png \
+  --epoch_min 1 --epoch_max 50 \
   --verbose
 """
 

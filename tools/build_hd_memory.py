@@ -12,6 +12,7 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
@@ -209,49 +210,83 @@ def _accumulate_from_batch_cell_level(
     labels_hw_a = box_cls_labels.view(B, HW, A).long()
 
     total_pos = 0
+    total_bg = 0
     step = int(chunk_cells) if int(chunk_cells) > 0 else -1
+    bg_ratio = float(getattr(hd_core.cfg, "bg_sample_ratio", 0.25))
+    bg_min = int(getattr(hd_core.cfg, "bg_min_per_anchor", 32))
+    use_bg = bool(getattr(hd_core.cfg, "bg_enabled", True))
 
     for a in range(A):
         lab = labels_hw_a[:, :, a]          # [B, HW]
         pos_mask = lab > 0                 # positives only (1..K)
-        if not pos_mask.any():
-            continue
 
         feat_sel = cell_feat[pos_mask]     # [Npos, C]
         lab_sel = lab[pos_mask] - 1        # -> [0..K-1]
-
-        if (lab_sel.min() < 0) or (lab_sel.max() >= K):
-            raise RuntimeError(
-                f"Shifted labels out of range: min={lab_sel.min().item()}, max={lab_sel.max().item()}, K={K}"
-            )
-
         Npos = feat_sel.shape[0]
-        if step <= 0:
-            step = Npos
 
-        start = 0
-        while start < Npos:
-            end = min(start + step, Npos)
-            f_chunk = feat_sel[start:end]
-            y_chunk = lab_sel[start:end]
-            a_chunk = torch.full_like(y_chunk, fill_value=int(a), dtype=torch.long)
+        if Npos > 0:
+            if (lab_sel.min() < 0) or (lab_sel.max() >= K):
+                raise RuntimeError(
+                    f"Shifted labels out of range: min={lab_sel.min().item()}, max={lab_sel.max().item()}, K={K}"
+                )
 
-            # Keep memory-build feature mapping consistent with inference-time HD logits.
-            f_chunk = hd_core.inject_anchor_context(
-                feat_mid=f_chunk,
-                anchor_ids=a_chunk,
-                num_anchors=A
-            )
+            pos_step = step if step > 0 else Npos
+            start = 0
+            while start < Npos:
+                end = min(start + pos_step, Npos)
+                f_chunk = feat_sel[start:end]
+                y_chunk = lab_sel[start:end]
+                a_chunk = torch.full_like(y_chunk, fill_value=int(a), dtype=torch.long)
 
-            hv = embedder(f_chunk)               # [n, HD_DIM]
-            memory.add_(y_chunk, hv, alpha=1.0)
+                # Keep memory-build feature mapping consistent with inference-time HD logits.
+                f_chunk = hd_core.inject_anchor_context(
+                    feat_mid=f_chunk,
+                    anchor_ids=a_chunk,
+                    num_anchors=A
+                )
 
-            start = end
+                hv = embedder(f_chunk)               # [n, HD_DIM]
+                # Build class centroid using unit hypervectors to avoid per-sample norm bias.
+                hv = F.normalize(hv.float(), p=2, dim=1)
+                memory.add_(y_chunk, hv, alpha=1.0)
 
-        total_pos += int(Npos)
+                start = end
 
-    memory.normalize_()
-    return total_pos
+            total_pos += int(Npos)
+
+        if use_bg:
+            bg_mask = (lab == 0)
+            if bg_mask.any():
+                feat_bg_all = cell_feat[bg_mask]
+                n_bg_all = int(feat_bg_all.shape[0])
+                n_bg_keep = min(n_bg_all, max(bg_min, int(max(1, Npos) * bg_ratio)))
+                if n_bg_keep > 0:
+                    if n_bg_all > n_bg_keep:
+                        perm = torch.randperm(n_bg_all, device=feat_bg_all.device)[:n_bg_keep]
+                        feat_bg = feat_bg_all[perm]
+                    else:
+                        feat_bg = feat_bg_all
+
+                    bg_step = step if step > 0 else max(1, int(feat_bg.shape[0]))
+                    start_bg = 0
+                    while start_bg < feat_bg.shape[0]:
+                        end_bg = min(start_bg + bg_step, feat_bg.shape[0])
+                        fb_chunk = feat_bg[start_bg:end_bg]
+                        a_bg = torch.full((fb_chunk.shape[0],), fill_value=int(a), dtype=torch.long, device=fb_chunk.device)
+
+                        fb_chunk = hd_core.inject_anchor_context(
+                            feat_mid=fb_chunk,
+                            anchor_ids=a_bg,
+                            num_anchors=A
+                        )
+                        hv_bg = embedder(fb_chunk)
+                        hv_bg = F.normalize(hv_bg.float(), p=2, dim=1)
+                        memory.add_bg_(hv_bg, alpha=1.0)
+                        start_bg = end_bg
+
+                    total_bg += int(feat_bg.shape[0])
+
+    return total_pos, total_bg
 
 
 def _tensor_fingerprint(x: torch.Tensor, n: int = 16):
@@ -348,6 +383,7 @@ def main():
     hd_core.memory.reset()
 
     total_pos = 0
+    total_bg = 0
     total_seen = 0
     use_autocast = bool(args.use_fp16)
 
@@ -419,7 +455,7 @@ def main():
             cared = box_cls_labels.view(-1) >= 0
             total_seen += int(cared.sum().item())
 
-            pos_added = _accumulate_from_batch_cell_level(
+            pos_added, bg_added = _accumulate_from_batch_cell_level(
                 dense_head=dense_head,
                 feat_map_2d=feat_map,
                 box_cls_labels=box_cls_labels,
@@ -428,9 +464,10 @@ def main():
                 chunk_cells=int(args.chunk_cells),
             )
             total_pos += int(pos_added)
+            total_bg += int(bg_added)
 
             if cfg_local.LOCAL_RANK == 0 and ((it + 1) % 200 == 0):
-                logger.info(f"[Iter {it+1}] accumulated_pos={total_pos}, total_seen={total_seen}")
+                logger.info(f"[Iter {it+1}] accumulated_pos={total_pos}, accumulated_bg={total_bg}, total_seen={total_seen}")
 
     # Final normalize + sanity
     hd_core.memory.normalize_()
@@ -440,7 +477,8 @@ def main():
         try:
             logger.info(
                 f"[MEM] proto_norm_mean={mem.prototypes.norm(dim=1).mean().item():.6f}, "
-                f"w_norm_mean={mem.classify_weights.norm(dim=1).mean().item():.6f}"
+                f"w_norm_mean={mem.classify_weights.norm(dim=1).mean().item():.6f}, "
+                f"bg_norm={mem.bg_weight.norm().item():.6f}"
             )
         except Exception:
             pass
@@ -470,8 +508,10 @@ def main():
         "memory": memory_sd,
         "classify_weights": hd_core.memory.classify_weights.detach().float().cpu(),
         "prototypes": hd_core.memory.prototypes.detach().float().cpu(),
+        "bg_weight": hd_core.memory.bg_weight.detach().float().cpu(),
+        "bg_prototype": hd_core.memory.bg_prototype.detach().float().cpu(),
         "meta": {
-            "source": f"hd_core.memory (cell-level accumulation, repeated to anchors) | feat_source={feat_source}",
+            "source": f"hd_core.memory (anchor-aware accumulation incl. bg prototype) | feat_source={feat_source}",
             "feat_source": feat_source,
             "feat_key": feat_key,
             "num_classes": int(num_classes),
@@ -480,6 +520,7 @@ def main():
             "cfg_file": args.cfg_file,
             "epoch_id": epoch_id,
             "total_pos_anchors": int(total_pos),
+            "total_bg_anchors": int(total_bg),
             "total_seen_anchors": int(total_seen),
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "hd_cfg": {
@@ -489,6 +530,10 @@ def main():
                 "TEMPERATURE": float(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "TEMPERATURE", 1.0)),
                 "SEED": int(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "SEED", 0)),
                 "FEAT_SOURCE": str(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "FEAT_SOURCE", feat_source)),
+                "BG_ENABLED": bool(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "BG_ENABLED", True)),
+                "BG_MARGIN_SCALE": float(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "BG_MARGIN_SCALE", 1.0)),
+                "BG_SAMPLE_RATIO": float(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "BG_SAMPLE_RATIO", 0.25)),
+                "BG_MIN_PER_ANCHOR": int(getattr(cfg_local.MODEL.DENSE_HEAD.HD, "BG_MIN_PER_ANCHOR", 32)),
             },
             "projection_fingerprint": proj_fp,
         }

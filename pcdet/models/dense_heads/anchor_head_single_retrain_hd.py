@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from contextlib import nullcontext
 
 from .anchor_head_template import AnchorHeadTemplate
@@ -163,8 +162,7 @@ class AnchorHeadSingleRetrainHD(AnchorHeadTemplate):
           spatial_features_2d -> cls_head (pre + out) / box_head -> permute -> (optional) assign_targets -> decode boxes
 
         With HD enabled:
-          - compute HD logits per CELL: [B*H*W, C_feat] -> [B*H*W, K]
-          - repeat across anchors: [B,H,W,K] -> [B,H,W,A*K]
+          - compute HD logits per ANCHOR: [B*H*W*A, C_feat] -> [B*H*W*A, K]
           - fuse with original cls logits (origin) by mode/lambda
         """
         spatial_features_2d = data_dict['spatial_features_2d']  # [B, C_in, H, W]
@@ -203,21 +201,22 @@ class AnchorHeadSingleRetrainHD(AnchorHeadTemplate):
                 feat_map = spatial_features_2d
                 C_feat = C_in
 
-            # We compute HD logits once per cell and repeat to anchors (memory-friendly).
+            # Compute HD logits per anchor (anchor-aware): [B,H,W,A,C] -> [B,H,W,A,K]
             grad_ctx = nullcontext() if (self.training and self.hd_train_use_grad) else torch.no_grad()
             with grad_ctx:
-                # [B, C, H, W] -> [B, H, W, C] -> [B*H*W, C]
+                # [B, C, H, W] -> [B, H, W, C] -> [B,H,W,A,C] -> [B*H*W*A, C]
                 cell_feat = feat_map.permute(0, 2, 3, 1).contiguous()
-                feat_cell = cell_feat.view(-1, C_feat)
+                feat_anchor = cell_feat.unsqueeze(3).expand(B, H, W, A, C_feat).reshape(-1, C_feat)
+                anchor_ids = torch.arange(A, device=feat_anchor.device).view(1, 1, 1, A).expand(B, H, W, A).reshape(-1)
 
-                # HD logits per cell: [B*H*W, K]
-                logits_cell, hv_cell = self.hd_core.compute_hd_logits(feat_cell)
+                feat_anchor = self.hd_core.inject_anchor_context(
+                    feat_mid=feat_anchor,
+                    anchor_ids=anchor_ids,
+                    num_anchors=A
+                )
 
-                # reshape to [B, H, W, K]
-                logits_cell = logits_cell.view(B, H, W, K)
-
-                # repeat across anchors: [B,H,W,K] -> [B,H,W,A,K] -> [B,H,W,A*K]
-                cls_preds_hd = logits_cell.unsqueeze(3).expand(B, H, W, A, K).reshape(B, H, W, A * K).contiguous()
+                logits_anchor, _ = self.hd_core.compute_hd_logits(feat_anchor)
+                cls_preds_hd = logits_anchor.view(B, H, W, A, K).reshape(B, H, W, A * K).contiguous()
 
                 # fuse
                 cls_fused = self.hd_core.fuse_logits(

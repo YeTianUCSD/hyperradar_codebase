@@ -92,9 +92,13 @@ MODEL:
             # Encoder (TorchHD)
             ENCODER: rp          # rp | idlevel | nonlinear
             HD_DIM: 10000
-            QUANTIZE: True
+            QUANTIZE: False
             TEMPERATURE: 1.0
             ANCHOR_ID_SCALE: 1.0
+            BG_ENABLED: False
+            BG_MARGIN_SCALE: 0.0
+            BG_SAMPLE_RATIO: 0.25
+            BG_MIN_PER_ANCHOR: 32
             SEED: 0
 
             # TorchHD / memory compute safety knobs (avoid OOM)

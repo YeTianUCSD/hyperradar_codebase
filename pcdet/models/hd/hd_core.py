@@ -88,6 +88,10 @@ class HDConfig:
     encode_chunk: int = 8192         # chunk size for encoding anchors
     logits_chunk: int = 8192         # chunk size for computing logits from hv
     anchor_id_scale: float = 0.0     # >0 enables anchor-aware feature context injection
+    bg_enabled: bool = True          # enable background prototype suppression
+    bg_margin_scale: float = 1.0     # fg_logit <- fg_logit - scale * bg_logit
+    bg_sample_ratio: float = 0.25    # used by memory build to sample bg anchors
+    bg_min_per_anchor: int = 32      # minimum sampled bg anchors per anchor type per batch
 
 
 # -----------------------------
@@ -160,7 +164,6 @@ class HDEmbedder(nn.Module):
         if device is not None or dtype is not None:
             self.to(device=device, dtype=dtype)
 
-    @torch.no_grad()
     def _encode_rp(self, feat: torch.Tensor) -> torch.Tensor:
         # Projection expects float tensors; keep stability with fp32 when needed.
         if feat.dtype not in (torch.float16, torch.float32, torch.bfloat16):
@@ -168,7 +171,6 @@ class HDEmbedder(nn.Module):
         # Assume embedder moved with model.cuda()
         return self.projection(feat)
 
-    @torch.no_grad()
     def _encode_idlevel(self, feat: torch.Tensor) -> torch.Tensor:
         """
         idlevel encoding:
@@ -216,13 +218,11 @@ class HDEmbedder(nn.Module):
         hv = functional.multiset(bound)        # [N, D]
         return hv
 
-    @torch.no_grad()
     def _encode_nonlinear(self, feat: torch.Tensor) -> torch.Tensor:
         if feat.dtype not in (torch.float16, torch.float32, torch.bfloat16):
             feat = feat.float()
         return self.nonlinear(feat)  # [N, D]
 
-    @torch.no_grad()
     def forward(self, feat: torch.Tensor, quantize: Optional[bool] = None) -> torch.Tensor:
         """
         Args:
@@ -248,7 +248,6 @@ class HDEmbedder(nn.Module):
             _hard_quantize_inplace(hv)
         return hv
 
-    @torch.no_grad()
     def forward_chunked(self, feat: torch.Tensor, chunk: int = 8192, quantize: Optional[bool] = None) -> torch.Tensor:
         """
         Chunked encoding to prevent OOM.
@@ -271,8 +270,8 @@ class HDEmbedder(nn.Module):
 class HDMemory(nn.Module):
     """
     Class prototype memory using additive updates.
-    - classify_weights: accumulator (sum of hypervectors)
-    - prototypes: normalized version used for cosine-sim logits
+    - classify_weights/prototypes: foreground class memory
+    - bg_weight/bg_prototype: background memory
     """
 
     def __init__(self, num_classes: int, hd_dim: int, device=None, dtype=None):
@@ -284,6 +283,8 @@ class HDMemory(nn.Module):
         self.register_buffer("classify_weights", w, persistent=True)
         p = torch.zeros_like(w)
         self.register_buffer("prototypes", p, persistent=True)
+        self.register_buffer("bg_weight", torch.zeros(self.hd_dim, dtype=torch.float32), persistent=True)
+        self.register_buffer("bg_prototype", torch.zeros(self.hd_dim, dtype=torch.float32), persistent=True)
 
         if device is not None or dtype is not None:
             self.to(device=device, dtype=dtype)
@@ -292,10 +293,14 @@ class HDMemory(nn.Module):
     def reset(self):
         self.classify_weights.zero_()
         self.prototypes.zero_()
+        self.bg_weight.zero_()
+        self.bg_prototype.zero_()
 
     @torch.no_grad()
     def normalize_(self):
         self.prototypes.copy_(_normalize_rows(self.classify_weights))
+        bg_norm = self.bg_weight.norm().clamp_min(1e-12)
+        self.bg_prototype.copy_(self.bg_weight / bg_norm)
 
     @torch.no_grad()
     def add_(self, labels: torch.Tensor, hv: torch.Tensor, alpha: float = 1.0):
@@ -323,6 +328,22 @@ class HDMemory(nn.Module):
         self.classify_weights.index_add_(0, labels, hv)
 
     @torch.no_grad()
+    def add_bg_(self, hv: torch.Tensor, alpha: float = 1.0):
+        """
+        Add hypervectors into background accumulator.
+        hv: [N, D]
+        """
+        assert hv.dim() == 2 and hv.shape[1] == self.hd_dim
+        dev = self.bg_weight.device
+        if hv.device != dev:
+            hv = hv.to(dev)
+        if hv.dtype != self.bg_weight.dtype:
+            hv = hv.to(self.bg_weight.dtype)
+        if alpha != 1.0:
+            hv = hv * float(alpha)
+        self.bg_weight.add_(hv.sum(dim=0))
+
+    @torch.no_grad()
     def retrain_correct_(self, y_true: torch.Tensor, y_pred: torch.Tensor, hv: torch.Tensor, alpha: float = 1.0):
         """
         Perceptron-style correction:
@@ -335,7 +356,6 @@ class HDMemory(nn.Module):
         self.add_(y_true, hv, alpha=1.0)
         self.add_(y_pred, -hv, alpha=1.0)
 
-    @torch.no_grad()
     def logits(self, hv: torch.Tensor, temperature: float = 1.0, chunk: int = 0) -> torch.Tensor:
         """
         Cosine-similarity logits between hv and prototypes.
@@ -361,6 +381,23 @@ class HDMemory(nn.Module):
                 outs.append(hv_n[s:e] @ Pt)
             out = torch.cat(outs, dim=0)
 
+        if temperature != 1.0:
+            out = out / float(temperature)
+        return out
+
+    def bg_logits(self, hv: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+        """
+        Cosine similarity to background prototype.
+        hv: [N, D], return: [N]
+        """
+        dev = self.bg_prototype.device
+        if hv.device != dev:
+            hv = hv.to(dev)
+        if hv.dtype != self.bg_prototype.dtype:
+            hv = hv.to(self.bg_prototype.dtype)
+        hv_n = _normalize_rows(hv)
+        bg = self.bg_prototype
+        out = hv_n @ bg
         if temperature != 1.0:
             out = out / float(temperature)
         return out
@@ -486,6 +523,10 @@ class HDCore(nn.Module):
         encode_chunk = int(_safe_get(enc_cfg, "ENCODE_CHUNK", 8192))
         logits_chunk = int(_safe_get(enc_cfg, "LOGITS_CHUNK", 8192))
         anchor_id_scale = float(_safe_get(hd_cfg, "ANCHOR_ID_SCALE", 0.0))
+        bg_enabled = bool(_safe_get(hd_cfg, "BG_ENABLED", True))
+        bg_margin_scale = float(_safe_get(hd_cfg, "BG_MARGIN_SCALE", 1.0))
+        bg_sample_ratio = float(_safe_get(hd_cfg, "BG_SAMPLE_RATIO", 0.25))
+        bg_min_per_anchor = int(_safe_get(hd_cfg, "BG_MIN_PER_ANCHOR", 32))
 
         cfg = HDConfig(
             enabled=enabled,
@@ -511,10 +552,13 @@ class HDCore(nn.Module):
             encode_chunk=encode_chunk,
             logits_chunk=logits_chunk,
             anchor_id_scale=anchor_id_scale,
+            bg_enabled=bg_enabled,
+            bg_margin_scale=bg_margin_scale,
+            bg_sample_ratio=bg_sample_ratio,
+            bg_min_per_anchor=bg_min_per_anchor,
         )
         return HDCore(cfg)
 
-    @torch.no_grad()
     def inject_anchor_context(
         self,
         feat_mid: torch.Tensor,
@@ -546,7 +590,6 @@ class HDCore(nn.Module):
         out[rows, cols] = out[rows, cols] + scale
         return out
 
-    @torch.no_grad()
     def compute_hd_logits(self, feat_mid: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Streaming compute:
@@ -569,8 +612,10 @@ class HDCore(nn.Module):
             e = min(s + encode_chunk, N)
             feat_chunk = feat_mid[s:e]
 
-            # Encode to hv (on GPU)
-            hv = self.embedder.forward(feat_chunk, quantize=self.cfg.quantize) 
+            # Encode to hv (on GPU). Quantization behavior is controlled only by cfg.quantize
+            # so train/build/infer remain consistent.
+            use_quantize = bool(self.cfg.quantize)
+            hv = self.embedder.forward(feat_chunk, quantize=use_quantize)
 
 
             # NOTE: embedder.forward already quantizes; if you moved quantize out, call _hard_quantize_inplace here
@@ -582,6 +627,9 @@ class HDCore(nn.Module):
                 temperature=float(self.cfg.temperature),
                 chunk=int(self.cfg.logits_chunk) if int(self.cfg.logits_chunk) > 0 else 0
             )
+            if bool(getattr(self.cfg, "bg_enabled", True)):
+                bg_logit = self.memory.bg_logits(hv, temperature=float(self.cfg.temperature)).unsqueeze(1)
+                logits = logits - float(getattr(self.cfg, "bg_margin_scale", 1.0)) * bg_logit
 
             out_logits.append(logits)
 
@@ -592,7 +640,6 @@ class HDCore(nn.Module):
         return logits_hd, None
 
 
-    @torch.no_grad()
     def fuse_logits(
         self,
         logits_origin: torch.Tensor,
@@ -653,6 +700,9 @@ class HDCore(nn.Module):
         """
         hardness = best_other - true_score (larger => harder)
         """
+        # labels from anchor targets are usually 1..K for positives; convert to 0..K-1.
+        if labels.numel() > 0 and int(labels.min().item()) >= 1:
+            labels = labels - 1
         idx = labels.view(-1, 1)
         true_score = torch.gather(logits, 1, idx).squeeze(1)
         mask = torch.zeros_like(logits, dtype=torch.bool)
@@ -728,10 +778,15 @@ class HDCore(nn.Module):
 
         if pos_feat.numel() == 0:
             return
+        # labels are usually 1..K for positives; memory indices are 0..K-1
+        if pos_labels.numel() > 0 and int(pos_labels.min().item()) >= 1:
+            pos_labels = pos_labels - 1
 
         steps = max(int(self.cfg.update_steps), 1)
         for _ in range(steps):
             hv = self.embedder.forward_chunked(pos_feat, chunk=int(self.cfg.encode_chunk))
+            # Real-valued centroid update: accumulate unit-norm sample hypervectors.
+            hv = _normalize_rows(hv)
             self.memory.add_(pos_labels, hv, alpha=alpha)
 
         self._update_counter += 1
@@ -759,8 +814,12 @@ class HDCore(nn.Module):
 
         if pos_feat.numel() == 0:
             return
+        # labels are usually 1..K for positives; convert to 0..K-1 to match logits/memory indexing
+        if pos_labels.numel() > 0 and int(pos_labels.min().item()) >= 1:
+            pos_labels = pos_labels - 1
 
         hv = self.embedder.forward_chunked(pos_feat, chunk=int(self.cfg.encode_chunk), quantize=self.cfg.quantize)
+        hv = _normalize_rows(hv)
         pred = pos_logits.argmax(dim=1).long()
         wrong = pred != pos_labels
         if wrong.sum().item() == 0:
