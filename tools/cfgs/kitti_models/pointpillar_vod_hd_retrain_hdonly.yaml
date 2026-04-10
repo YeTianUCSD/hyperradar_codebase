@@ -87,7 +87,7 @@ MODEL:
             ASSIGN_TARGETS_IN_EVAL: True
 
             # Debug / export switches (optional, safe to keep)
-            DEBUG_SAVE_LOGITS: False
+            DEBUG_SAVE_LOGITS: True
             EXPORT_FOR_ONLINE: False
 
             # Encoder (TorchHD)

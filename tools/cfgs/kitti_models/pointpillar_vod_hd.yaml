@@ -78,7 +78,7 @@ MODEL:
             # baseline: use original conv_cls logits
             # hd_only:  use HD logits only
             # fused:    lambda * origin + (1-lambda) * hd
-            MODE: baseline
+            MODE: hd_only
             LAMBDA: 0.5
             FEAT_SOURCE: cls   # bev | cls, default to cls so HD uses penultimate cls feature
 

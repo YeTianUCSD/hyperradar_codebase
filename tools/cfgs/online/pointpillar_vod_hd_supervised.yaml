@@ -1,0 +1,107 @@
+SUPERVISED_ONLINE:
+  # -----------------------------
+  # Dataset / split setup
+  # -----------------------------
+  # stream_split:
+  #   labeled stream pool used for supervised prototype updates.
+  # eval_split:
+  #   fixed holdout split used for periodic validation and final evaluation.
+  stream_split: val_stream_by_scene
+  eval_split: val_eval_by_scene
+  stream_info_paths:
+    - kitti_infos_val_stream_by_scene.pkl
+  eval_info_paths:
+    - kitti_infos_val_eval_by_scene.pkl
+
+  # Use only the first STREAM_RATIO portion of STREAM_SPLIT in stream order.
+  # This is the main knob for comparing "how much labeled stream data is needed".
+  stream_ratio: 1
+
+  # Optional cap on stream samples after ratio is applied.
+  # <= 0 means no extra cap.
+  max_stream_samples: 0
+
+  # If True, preserve dataset order exactly.
+  # If False, sample a fixed random subset from the stream pool before streaming.
+  use_stream_prefix: true
+  stream_seed: 0
+
+  # -----------------------------
+  # Feature / update source
+  # -----------------------------
+  # cls -> use batch_dict['hd_cls_feat']
+  # bev -> use batch_dict['spatial_features_2d']
+  feature_source: cls
+
+  # Update mode for HD memory.
+  # train   -> centroid-style add update with GT positives
+  # retrain -> perceptron-style correction on wrong positives
+  # both    -> train update followed by retrain correction
+  update_mode: train
+
+  # Step size for memory update.
+  alpha: 1
+
+  # How often to apply an accumulated update.
+  update_every_n_batches: 1
+
+  # Normalize HD memory every N applied updates.
+  normalize_every_updates: 1
+
+  # -----------------------------
+  # Positive anchor sampling
+  # -----------------------------
+  # Sample only GT-positive anchors for supervised updates.
+  # Per-class caps prevent Car from dominating the memory update.
+  max_pos_per_class_per_batch: 4096
+
+  # Require at least this many positives for a class before updating that class
+  # in a given batch. 0 means "use whatever is available".
+  min_pos_per_class_per_batch: 0
+
+  # Optional global cap after per-class sampling.
+  # <= 0 means no cap.
+  max_total_pos_per_batch: 0
+
+  # If True, only update classes that appear in gt for the current batch.
+  # Kept for explicitness; typically should remain true.
+  gt_only: true
+
+  # -----------------------------
+  # Evaluation / selection
+  # -----------------------------
+  # Evaluate every N applied updates on the fixed eval split.
+  # 0 means "skip periodic eval during online updates".
+  # Use 10 here to monitor recall during the update process without running
+  # the expensive official evaluation each time.
+  eval_every_updates: 10
+
+  # Metric used to track best memory snapshot.
+  metric_key: recall/rcnn_0.3
+
+  # Fast recall-only validation for frequent checks.
+  fast_recall_only: true
+
+  # Run one final full official evaluation at the end.
+  final_full_eval: true
+
+  # -----------------------------
+  # Saving / logging
+  # -----------------------------
+  save_every_updates: 50
+  log_every_n_batches: 10
+
+  # Save predictions during eval.
+  save_to_file: false
+
+  # -----------------------------
+  # Safety / bookkeeping
+  # -----------------------------
+  # Save best memory snapshot according to METRIC_KEY.
+  save_best_memory: true
+
+  # Always save the last memory snapshot.
+  save_last_memory: true
+
+  # Optional tag recorded into metadata files.
+  experiment_note: supervised_stream_hd_update
