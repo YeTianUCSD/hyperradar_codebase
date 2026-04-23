@@ -16,8 +16,8 @@ LOG=/home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vo
 
 nohup python -u retrainHD.py \
   --cfg_file cfgs/kitti_models/pointpillar_vod_hd_retrain_hdonly.yaml \
-  --base_ckpt /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd/run500_cls/ckpt/checkpoint_epoch_18.pth \
-  --extra_tag run500_cls_retrain_hd_0319 \
+  --base_ckpt /home/code/hyperradar/hyperradar_codebase/output/kitti_models/pointpillar_vod_hd/run100_cls/ckpt/checkpoint_epoch_18.pth \
+  --extra_tag run100_cls_retrain_hd_0319 \
   --batch_size 1 \
   --workers 0 \
   --eval_workers 0 \
