@@ -1,0 +1,131 @@
+ALL_SUPERVISED_ONLINE:
+  # -----------------------------
+  # Dataset / split setup
+  # -----------------------------
+  # Keep the same by-scene supervised split used by HD/NN supervised runs.
+  stream_split: val_stream_by_scene
+  eval_split: val_eval_by_scene
+  stream_info_paths:
+    - kitti_infos_val_stream_by_scene.pkl
+  eval_info_paths:
+    - kitti_infos_val_eval_by_scene.pkl
+
+  # Use only the first STREAM_RATIO portion of STREAM_SPLIT in stream order.
+  stream_ratio: 1
+
+  # Optional cap on stream samples after ratio is applied.
+  # <= 0 means no extra cap.
+  max_stream_samples: 0
+
+  # If True, preserve dataset order exactly.
+  # If False, sample a fixed random subset from the stream pool before streaming.
+  use_stream_prefix: true
+  stream_seed: 0
+
+  # -----------------------------
+  # Trainable scope
+  # -----------------------------
+  # Experiment definition: online update ALL-cls+HD.
+  # Train only classification feature adaptor, CNN classifier, and HD embedder.
+  # HD memory/prototypes are updated by the supervised HD memory rule.
+  train_conv_cls_pre: true
+  train_conv_cls_out: true
+  train_hd_embedder: true
+  update_hd_memory: true
+
+  # Keep the detector localization path fixed so changes are attributable to
+  # classification feature/head + HD adaptation.
+  freeze_vfe: true
+  freeze_map_to_bev: true
+  freeze_backbone_2d: true
+  freeze_box_head: true
+  freeze_dir_head: true
+
+  # -----------------------------
+  # Supervised classification losses
+  # -----------------------------
+  # HD.MODE is hd_only in the detector cfg, so final cls_preds train the HD path.
+  # cls_preds_origin is trained explicitly so conv_cls_out also adapts online.
+  loss_hd_weight: 1.0
+  loss_cnn_weight: 0.5
+
+  # -----------------------------
+  # Optimizer
+  # -----------------------------
+  optimizer: adamw
+  lr: 0.00005
+  weight_decay: 0.0
+  momentum: 0.9
+  grad_clip: 10.0
+
+  # Apply one optimizer/memory update every N stream batches.
+  update_every_n_batches: 1
+
+  # -----------------------------
+  # HD memory update
+  # -----------------------------
+  # cls -> use batch_dict['hd_cls_feat']
+  # bev -> use batch_dict['spatial_features_2d']
+  feature_source: cls
+
+  # train   -> centroid-style add update with GT positives
+  # retrain -> perceptron-style correction on wrong positives
+  # both    -> train update followed by retrain correction
+  update_mode: train
+
+  # Step size for memory update.
+  alpha: 1.0
+
+  # Normalize HD memory every N applied updates.
+  normalize_every_updates: 1
+
+  # -----------------------------
+  # Positive anchor sampling
+  # -----------------------------
+  # Sample only GT-positive anchors for supervised updates.
+  # Per-class caps prevent Car from dominating the update.
+  max_pos_per_class_per_batch: 4096
+
+  # Require at least this many positives for a class before using that class
+  # in a given batch. 0 means "use whatever is available".
+  min_pos_per_class_per_batch: 0
+
+  # Optional global cap after per-class sampling.
+  # <= 0 means no cap.
+  max_total_pos_per_batch: 0
+
+  # -----------------------------
+  # Evaluation / guard
+  # -----------------------------
+  # Evaluate every N applied updates on the fixed eval split.
+  # 0 means "skip periodic eval during online updates".
+  eval_every_updates: 10
+
+  # Metric used to track best model snapshot.
+  metric_key: recall/rcnn_0.3
+
+  # Fast recall-only validation for frequent checks.
+  fast_recall_only: true
+
+  # Run one final full official evaluation at the end.
+  final_full_eval: true
+
+  # Roll back model + optimizer + HD memory if validation drops too much.
+  guard_max_drop: 0.01
+  guard_use_best: true
+
+  # -----------------------------
+  # Saving / logging
+  # -----------------------------
+  save_every_updates: 50
+  log_every_n_batches: 10
+
+  # Save predictions during eval.
+  save_to_file: false
+
+  # Save best/last full model snapshots. HD memory is included in state_dict.
+  save_best_model: true
+  save_last_model: true
+
+  # Optional tag recorded into metadata files.
+  experiment_note: supervised_stream_all_cls_hd_update

@@ -1,0 +1,109 @@
+# Unsupervised online adaptation config for pure CNN PointPillar (NO HD).
+#
+# Experiment target:
+#   pretrain CNN -> online update only dense_head.conv_cls_out
+#   freeze VFE / BEV / backbone / conv_cls_pre / box / direction heads
+
+PURE_CNN_ONLINE:
+  # -----------------------------
+  # Data stream / eval splits
+  # -----------------------------
+  stream_split: val_stream_by_scene
+  eval_split: val_eval_by_scene
+  stream_info_paths:
+    - kitti_infos_val_stream_by_scene.pkl
+  eval_info_paths:
+    - kitti_infos_val_eval_by_scene.pkl
+
+  stream_ratio: 1.0
+  max_stream_samples: 0
+  use_stream_prefix: true
+  stream_seed: 0
+
+  # -----------------------------
+  # Trainable scope
+  # -----------------------------
+  train_conv_cls_pre: false
+  train_conv_cls_out: true
+  freeze_vfe: true
+  freeze_map_to_bev: true
+  freeze_backbone_2d: true
+  freeze_box_head: true
+  freeze_dir_head: true
+
+  # -----------------------------
+  # Pseudo-label selection
+  # -----------------------------
+  tau_prob: 0.40
+  tau_margin: 0.08
+  min_tau_prob: 0.15
+  min_tau_margin: 0.01
+  select_top_ratio: 0.005
+  select_min_k: 64
+  select_max_k: 256
+  consistency_bonus: 0.10
+  inconsistency_penalty: 0.05
+
+  # -----------------------------
+  # Teacher classifier EMA
+  # -----------------------------
+  use_teacher: true
+  teacher_momentum: 0.995
+
+  # -----------------------------
+  # Update trigger
+  # -----------------------------
+  update_every_n_steps: 32
+  min_selected_anchors: 1024
+  min_confpass_anchors: 256
+
+  # -----------------------------
+  # Optimizer
+  # -----------------------------
+  optimizer: adamw
+  lr: 0.0001
+  weight_decay: 0.0
+  momentum: 0.9
+  grad_clip: 0.0
+
+  # -----------------------------
+  # Class balance
+  # -----------------------------
+  max_per_class_per_step: 0
+  min_per_class_for_update: 64
+  class_balance_enable: true
+  class_balance_min_classes_to_update: 2
+  class_balance_max_pending_steps: 0
+
+  # -----------------------------
+  # Guard / rollback
+  # -----------------------------
+  eval_every_updates: 1
+  metric_key: recall/rcnn_0.3
+  guard_max_drop: 0.01
+  guard_use_best: true
+
+  # -----------------------------
+  # Logging / checkpointing
+  # -----------------------------
+  save_every_updates: 5
+  log_interval_steps: 10
+  save_to_file: false
+  final_full_eval: true
+  fast_recall_only: true
+  save_best_model: true
+  save_last_model: true
+
+  # -----------------------------
+  # Logit source
+  # -----------------------------
+  # Pure CNN only supports final/origin. Keep origin for stable pre-update pseudo labels.
+  pseudo_logits_source: origin
+
+  # -----------------------------
+  # Threshold relaxation if no anchors selected
+  # -----------------------------
+  zero_update_tau_prob_step: 0.02
+  zero_update_tau_margin_step: 0.005
+
+  experiment_note: pure_cnn_unsupervised_conv_cls_out_only

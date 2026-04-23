@@ -1,0 +1,80 @@
+# Unsupervised online adaptation config for pure CNN PointPillar (NO HD).
+#
+# Experiment target:
+#   pretrain CNN -> online update backbone_2d + dense_head.conv_cls_pre + dense_head.conv_cls_out
+#   freeze VFE / BEV mapping / box / direction heads
+
+PURE_CNN_ONLINE:
+  stream_split: val_stream_by_scene
+  eval_split: val_eval_by_scene
+  stream_info_paths:
+    - kitti_infos_val_stream_by_scene.pkl
+  eval_info_paths:
+    - kitti_infos_val_eval_by_scene.pkl
+
+  stream_ratio: 1.0
+  max_stream_samples: 0
+  use_stream_prefix: true
+  stream_seed: 0
+
+  train_conv_cls_pre: true
+  train_conv_cls_out: true
+  freeze_vfe: true
+  freeze_map_to_bev: true
+  freeze_backbone_2d: false
+  freeze_box_head: true
+  freeze_dir_head: true
+
+  tau_prob: 0.45
+  tau_margin: 0.10
+  min_tau_prob: 0.20
+  min_tau_margin: 0.02
+  select_top_ratio: 0.003
+  select_min_k: 32
+  select_max_k: 128
+  consistency_bonus: 0.0
+  inconsistency_penalty: 0.0
+
+  # Disabled by default because this experiment updates backbone_2d and
+  # conv_cls_pre too; the lightweight teacher only tracks conv_cls_out.
+  use_teacher: false
+  teacher_momentum: 0.995
+
+  update_every_n_steps: 32
+  min_selected_anchors: 512
+  min_confpass_anchors: 128
+
+  optimizer: adamw
+  lr: 0.00001
+  lr_backbone_2d: 0.00001
+  lr_conv_cls_pre: 0.00005
+  lr_conv_cls_out: 0.0001
+  weight_decay: 0.0
+  momentum: 0.9
+  grad_clip: 1.0
+
+  max_per_class_per_step: 0
+  min_per_class_for_update: 32
+  class_balance_enable: true
+  class_balance_min_classes_to_update: 2
+  class_balance_max_pending_steps: 0
+
+  eval_every_updates: 1
+  metric_key: recall/rcnn_0.3
+  guard_max_drop: 0.01
+  guard_use_best: true
+
+  save_every_updates: 5
+  log_interval_steps: 10
+  save_to_file: false
+  final_full_eval: true
+  fast_recall_only: true
+  save_best_model: true
+  save_last_model: true
+
+  pseudo_logits_source: origin
+
+  zero_update_tau_prob_step: 0.01
+  zero_update_tau_margin_step: 0.005
+
+  experiment_note: pure_cnn_unsupervised_backbone2d_conv_cls_pre_conv_cls_out

@@ -1,0 +1,141 @@
+ALL_ONLINE:
+  # -----------------------------
+  # Dataset / split setup
+  # -----------------------------
+  # Match the unsupervised HD/NN protocol:
+  # stream_split is the unlabeled online data stream;
+  # eval_split is the fixed validation split for guard/final eval.
+  stream_split: test
+  eval_split: val
+
+  stream_ratio: 1.0
+  max_stream_samples: 0
+  use_stream_prefix: true
+  stream_seed: 0
+
+  # -----------------------------
+  # Trainable scope
+  # -----------------------------
+  # Unsupervised ALL-cls+HD first version:
+  # update the classification feature adaptor, CNN classifier, and HD memory.
+  # Keep the HD embedder fixed to reduce pseudo-label drift.
+  train_conv_cls_pre: true
+  train_conv_cls_out: true
+  train_hd_embedder: false
+  update_hd_memory: true
+
+  # Keep detector backbone/localization fixed.
+  freeze_vfe: true
+  freeze_map_to_bev: true
+  freeze_backbone_2d: true
+  freeze_box_head: true
+  freeze_dir_head: true
+
+  # -----------------------------
+  # Pseudo-label selection
+  # -----------------------------
+  # Pseudo labels come from CNN origin logits. Teacher consistency stabilizes
+  # the CNN target; HD consistency only filters anchors, it does not define
+  # labels by itself.
+  pseudo_logits_source: origin
+  tau_prob: 0.40
+  tau_margin: 0.08
+  min_tau_prob: 0.15
+  min_tau_margin: 0.01
+
+  select_top_ratio: 0.005
+  select_min_k: 64
+  select_max_k: 256
+
+  use_teacher: true
+  teacher_momentum: 0.995
+  consistency_bonus: 0.10
+  inconsistency_penalty: 0.05
+
+  use_hd_consistency: true
+
+  # -----------------------------
+  # Online classification losses
+  # -----------------------------
+  # For unsupervised update, keep CNN origin path as the stronger anchor and
+  # adapt HD path more conservatively.
+  loss_cnn_weight: 1.0
+  loss_hd_weight: 0.5
+
+  # -----------------------------
+  # Optimizer
+  # -----------------------------
+  optimizer: adamw
+  lr: 0.00002
+  weight_decay: 0.0
+  momentum: 0.9
+  grad_clip: 10.0
+
+  # -----------------------------
+  # Update trigger
+  # -----------------------------
+  # Accumulate selected pseudo anchors for N stream steps, then apply one
+  # optimizer step and one HD-memory update if quality gates pass.
+  update_every_n_steps: 32
+  min_selected_anchors: 1024
+  min_confpass_anchors: 256
+
+  # -----------------------------
+  # HD memory update
+  # -----------------------------
+  # cls -> use batch_dict['hd_cls_feat']
+  # bev -> use batch_dict['spatial_features_2d']
+  feature_source: cls
+
+  # train   -> centroid-style add update with pseudo labels
+  # retrain -> perceptron-style correction on wrong pseudo predictions
+  # both    -> train update followed by retrain correction
+  update_mode: train
+
+  # Use a much smaller memory step than supervised updates to reduce drift.
+  alpha: 0.005
+  normalize_every_updates: 1
+
+  # Optional source-memory pullback after successful updates.
+  # 0 disables it. If implemented by the runner, a small value can stabilize
+  # long streams.
+  source_pullback_lambda: 0.0
+
+  # -----------------------------
+  # Per-step class balance / caps
+  # -----------------------------
+  # <=0 means no per-class cap.
+  max_per_class_per_step: 0
+
+  # Class considered effectively updated only if touched this many times in
+  # the pending buffer.
+  min_per_class_for_update: 64
+
+  class_balance_enable: true
+  class_balance_min_classes_to_update: 2
+  class_balance_max_pending_steps: 0
+
+  # -----------------------------
+  # Guard / rollback
+  # -----------------------------
+  eval_every_updates: 1
+  metric_key: recall/rcnn_0.3
+  guard_max_drop: 0.01
+  guard_use_best: true
+
+  # -----------------------------
+  # Logging / checkpointing
+  # -----------------------------
+  save_every_updates: 5
+  log_interval_steps: 10
+  save_best_model: true
+  save_last_model: true
+  save_to_file: false
+
+  # -----------------------------
+  # Threshold relaxation if no anchors selected
+  # -----------------------------
+  zero_update_tau_prob_step: 0.02
+  zero_update_tau_margin_step: 0.005
+
+  experiment_note: unsupervised_stream_all_cls_hd_update

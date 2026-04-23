@@ -1,0 +1,96 @@
+CNN_SUPERVISED_ONLINE:
+  # -----------------------------
+  # Dataset / split setup
+  # -----------------------------
+  # stream_split:
+  #   labeled stream pool used for supervised CNN head updates.
+  # eval_split:
+  #   fixed holdout split used for periodic validation and final evaluation.
+  stream_split: val_stream_by_scene
+  eval_split: val_eval_by_scene
+  stream_info_paths:
+    - kitti_infos_val_stream_by_scene.pkl
+  eval_info_paths:
+    - kitti_infos_val_eval_by_scene.pkl
+
+  # Use only the first STREAM_RATIO portion of STREAM_SPLIT in stream order.
+  stream_ratio: 1
+
+  # Optional cap on stream samples after ratio is applied.
+  # <= 0 means no extra cap.
+  max_stream_samples: 0
+
+  # If True, preserve dataset order exactly.
+  # If False, sample a fixed random subset from the stream pool before streaming.
+  use_stream_prefix: true
+  stream_seed: 0
+
+  # -----------------------------
+  # CNN head online update
+  # -----------------------------
+  # update_every_n_batches:
+  #   accumulate gradients across N stream batches, then apply one optimizer step.
+  update_every_n_batches: 1
+
+  # Gradient clipping for trainable CNN head params.
+  grad_clip: 0
+
+  # -----------------------------
+  # Positive anchor sampling
+  # -----------------------------
+  # Sample only GT-positive anchors for supervised updates.
+  # Per-class caps prevent Car from dominating the CNN head update.
+  max_pos_per_class_per_batch: 4096
+
+  # Require at least this many positives for a class before updating that class
+  # in a given batch. 0 means "use whatever is available".
+  min_pos_per_class_per_batch: 0
+
+  # Optional global cap after per-class sampling.
+  # <= 0 means no cap.
+  max_total_pos_per_batch: 0
+
+  # -----------------------------
+  # Optimizer
+  # -----------------------------
+  optimizer: adamw
+  lr: 0.0001
+  weight_decay: 0.0
+  momentum: 0.9
+
+  # -----------------------------
+  # Evaluation / selection
+  # -----------------------------
+  # Evaluate every N optimizer updates on the fixed eval split.
+  # 0 means "skip periodic eval during online updates".
+  eval_every_updates: 10
+
+  # Metric used to track best CNN checkpoint.
+  metric_key: recall/rcnn_0.3
+
+  # Fast recall-only validation for frequent checks.
+  fast_recall_only: true
+
+  # Run one final full official evaluation at the end.
+  final_full_eval: true
+
+  # -----------------------------
+  # Saving / logging
+  # -----------------------------
+  save_every_updates: 50
+  log_every_n_batches: 10
+
+  # Save predictions during eval.
+  save_to_file: false
+
+  # -----------------------------
+  # Safety / bookkeeping
+  # -----------------------------
+  # Save best model snapshot according to METRIC_KEY.
+  save_best_model: true
+
+  # Always save the last model snapshot.
+  save_last_model: true
+
+  # Optional tag recorded into metadata files.
+  experiment_note: supervised_stream_cnn_head_update

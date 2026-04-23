@@ -1,0 +1,89 @@
+# Unsupervised online CNN classifier adaptation config for HyperRadar PointPillar (VoD radar)
+#
+# This preset mirrors pointpillar_vod_hd_online.yaml as closely as possible, but
+# the online update target is the frozen-detector CNN classifier layer
+# dense_head.conv_cls_out instead of HD memory/prototypes.
+
+CNN_ONLINE:
+  # -----------------------------
+  # Pseudo-label selection
+  # -----------------------------
+  tau_prob: 0.40
+  tau_margin: 0.08
+  min_tau_prob: 0.15
+  min_tau_margin: 0.01
+
+  # Adaptive top-k selector on candidate anchors
+  select_top_ratio: 0.005
+  select_min_k: 64
+  select_max_k: 256
+
+  # Teacher-student consistency shaping
+  consistency_bonus: 0.10
+  inconsistency_penalty: 0.05
+
+  # -----------------------------
+  # Teacher classifier EMA
+  # -----------------------------
+  use_teacher: true
+  teacher_momentum: 0.995
+
+  # -----------------------------
+  # Update trigger
+  # -----------------------------
+  # Runner attempts one optimizer update every N stream steps.
+  update_every_n_steps: 32
+  # Require enough selected/confident anchors before applying accumulated grads.
+  min_selected_anchors: 1024
+  min_confpass_anchors: 256
+
+  # -----------------------------
+  # CNN classifier update
+  # -----------------------------
+  # Only dense_head.conv_cls_out should be trainable. Earlier feature extraction
+  # layers, including dense_head.conv_cls_pre, remain frozen.
+  optimizer: adamw
+  lr: 0.0001
+  weight_decay: 0.0
+  momentum: 0.9
+  grad_clip: 0.0
+
+  # Per-step class cap (<=0 means no cap)
+  max_per_class_per_step: 0
+  # Class considered effectively updated only if touched this many times.
+  min_per_class_for_update: 64
+  # Class-balance gate:
+  #   enable=true  -> accumulate pending buffer until class support is enough.
+  #   min_classes_to_update<=0 -> require all classes.
+  class_balance_enable: true
+  class_balance_min_classes_to_update: 2
+  # Disable forced updates when classes are imbalanced; skip updates instead.
+  class_balance_max_pending_steps: 0
+
+  # -----------------------------
+  # Guard / rollback
+  # -----------------------------
+  eval_every_updates: 1
+  metric_key: recall/rcnn_0.3
+  guard_max_drop: 0.01
+  guard_use_best: true
+
+  # -----------------------------
+  # Logging / checkpointing
+  # -----------------------------
+  save_every_updates: 5
+  log_interval_steps: 10
+
+  # -----------------------------
+  # Logit source
+  # -----------------------------
+  # pseudo logits for selection:
+  #   final | origin | hd
+  # For the fair NN-vs-HD comparison, keep this aligned with the HD online run.
+  pseudo_logits_source: origin
+
+  # -----------------------------
+  # Threshold relaxation if no anchors selected
+  # -----------------------------
+  zero_update_tau_prob_step: 0.02
+  zero_update_tau_margin_step: 0.005

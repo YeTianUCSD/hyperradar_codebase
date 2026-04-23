@@ -1,0 +1,74 @@
+PURE_CNN_SUPERVISED_ONLINE:
+  # -----------------------------
+  # Dataset / split setup
+  # -----------------------------
+  # Labeled stream used for supervised online updates.
+  stream_split: val_stream_by_scene
+  eval_split: val_eval_by_scene
+  stream_info_paths:
+    - kitti_infos_val_stream_by_scene.pkl
+  eval_info_paths:
+    - kitti_infos_val_eval_by_scene.pkl
+
+  stream_ratio: 1.0
+  max_stream_samples: 0
+  use_stream_prefix: true
+  stream_seed: 0
+
+  # -----------------------------
+  # Trainable scope
+  # -----------------------------
+  # Pure CNN larger update:
+  # update BEV backbone + full classification branch.
+  # Keep low-level VFE/BEV mapping, box regression, and direction heads frozen.
+  train_conv_cls_pre: true
+  train_conv_cls_out: true
+
+  freeze_vfe: true
+  freeze_map_to_bev: true
+  freeze_backbone_2d: false
+  freeze_box_head: true
+  freeze_dir_head: true
+
+  # -----------------------------
+  # Online supervised update
+  # -----------------------------
+  update_every_n_batches: 1
+
+  # Sample only GT-positive anchors for supervised updates.
+  max_pos_per_class_per_batch: 4096
+  min_pos_per_class_per_batch: 0
+  max_total_pos_per_batch: 0
+
+  # -----------------------------
+  # Optimizer
+  # -----------------------------
+  optimizer: adamw
+  lr: 0.00001
+  lr_backbone_2d: 0.00001
+  lr_conv_cls_pre: 0.00005
+  lr_conv_cls_out: 0.0001
+  weight_decay: 0.0
+  momentum: 0.9
+  grad_clip: 1.0
+
+  # -----------------------------
+  # Evaluation / selection
+  # -----------------------------
+  eval_every_updates: 1
+  metric_key: recall/rcnn_0.3
+  fast_recall_only: true
+  final_full_eval: true
+  guard_max_drop: 0.01
+  guard_use_best: true
+
+  # -----------------------------
+  # Logging / checkpointing
+  # -----------------------------
+  save_every_updates: 20
+  log_every_n_batches: 10
+  save_best_model: true
+  save_last_model: true
+  save_to_file: false
+
+  experiment_note: pure_cnn_supervised_backbone2d_conv_cls_pre_conv_cls_out
