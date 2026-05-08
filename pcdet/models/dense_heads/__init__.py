@@ -1,6 +1,7 @@
 from .anchor_head_multi import AnchorHeadMulti
 from .anchor_head_single import AnchorHeadSingle
 from .anchor_head_single_retrain_hd import AnchorHeadSingleRetrainHD
+from .anchor_head_single_retrain_hd_adapter import AnchorHeadSingleRetrainHDAdapter
 from .anchor_head_template import AnchorHeadTemplate
 from .point_head_box import PointHeadBox,PointHeadPreMask
 from .point_head_simple import PointHeadSimple
@@ -13,6 +14,7 @@ __all__ = {
     'AnchorHeadTemplate': AnchorHeadTemplate,
     'AnchorHeadSingle': AnchorHeadSingle,
     'AnchorHeadSingleRetrainHD': AnchorHeadSingleRetrainHD,
+    'AnchorHeadSingleRetrainHDAdapter': AnchorHeadSingleRetrainHDAdapter,
     'PointIntraPartOffsetHead': PointIntraPartOffsetHead,
     'PointHeadSimple': PointHeadSimple,
     'PointHeadBox': PointHeadBox,
