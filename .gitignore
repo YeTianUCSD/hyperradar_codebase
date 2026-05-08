@@ -186,3 +186,4 @@ cython_debug/
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
 
 /output
+/tools/visualization
